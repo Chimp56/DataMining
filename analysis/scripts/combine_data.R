@@ -1,0 +1,1 @@
+iuu_ais_disabling <- merge(ais_disabling, iuu_list, by.x = "mmsi", by.y = "MMSI", all.x = FALSE, all.y = TRUE)
