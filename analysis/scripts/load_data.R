@@ -106,9 +106,10 @@ load_yearly_data_to_duckdb <- function(data_type, years) {
     if (dir.exists(dir_path)) {
       success <- load_csvs_to_duckdb(dir_path, table_name)
       if (success) {
+        # This will be in preprocessing later
         # Add year column to the table
-        dbExecute(con, paste0("ALTER TABLE ", table_name, " ADD COLUMN year INTEGER"))
-        dbExecute(con, paste0("UPDATE ", table_name, " SET year = ", year))
+        # dbExecute(con, paste0("ALTER TABLE ", table_name, " ADD COLUMN year INTEGER"))
+        # dbExecute(con, paste0("UPDATE ", table_name, " SET year = ", year))
 
         # Get row count
         info <- get_table_info(table_name)
@@ -182,6 +183,13 @@ if ("fleet_daily_2020" %in% tables) {
   print(head(fleet_daily_lazy, 5))
 }
 
+if ("fleet_monthly_2020" %in% tables) {
+  fleet_monthly_lazy <- tbl(con, "fleet_monthly_2020")
+  cat("Fleet monthly 2020 columns:", paste(colnames(fleet_monthly_lazy), collapse = ", "), "\n")
+  cat("Fleet monthly 2020 preview:\n")
+  print(head(fleet_monthly_lazy, 5))
+}
+
 if ("mmsi_daily_2020" %in% tables) {
   mmsi_daily_lazy <- tbl(con, "mmsi_daily_2020")
   cat("MMSI daily 2020 columns:", paste(colnames(mmsi_daily_lazy), collapse = ", "), "\n")
@@ -251,4 +259,28 @@ cat("\nUse query_data() function to execute SQL queries\n")
 cat("Use get_sample_data() function to get sample data for analysis\n")
 cat("Use aggregate_data() function for memory-efficient aggregations\n")
 cat("Database will be automatically saved when script ends\n")
+
+
+# load all mmsi daily into memory
+
+mmsi_daily_2020 <- tbl(con, "mmsi_daily_2020") %>%
+  collect()
+mmsi_daily_2021 <- tbl(con, "mmsi_daily_2021") %>%
+  collect()
+mmsi_daily_2022 <- tbl(con, "mmsi_daily_2022") %>%
+  collect()
+mmsi_daily_2023 <- tbl(con, "mmsi_daily_2023") %>%
+  collect()
+mmsi_daily_2024 <- tbl(con, "mmsi_daily_2024") %>%
+  collect()
+
+mmsi_daily <- bind_rows(mmsi_daily_2020, mmsi_daily_2021, mmsi_daily_2022, mmsi_daily_2023, mmsi_daily_2024)
+
+
+# delete mmsi daily tables from memory
+
+rm(mmsi_daily_2020, mmsi_daily_2021, mmsi_daily_2022, mmsi_daily_2023, mmsi_daily_2024)
+
+
+
 
