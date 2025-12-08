@@ -2,7 +2,8 @@ analysis/data/FishingVessels/
 
 documents/*.docx
 
-
+application/frontend/node_modules/
+application/frontend/build/
 
 
 
