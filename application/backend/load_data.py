@@ -84,7 +84,7 @@ def load_mmsi_daily(chunk_size=50000):
         total_rows += len(chunk)
         print(f"Loaded {total_rows:,} rows...", end='\r')
     
-    print(f"\n✓ Loaded {total_rows:,} rows from {csv_path.name}")
+    print(f"\nLoaded {total_rows:,} rows from {csv_path.name}")
 
 
 def load_mpa():
