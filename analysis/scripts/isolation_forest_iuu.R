@@ -145,6 +145,8 @@ iForest_score <- function(model, X) {
 
 # Prepare numeric feature matrix: drop id and any non-numeric columns
 prepare_feature_matrix <- function(df, exclude_cols = c("mmsi", "is_known_iuu")) {
+  # Ensure plain data.frame for predictable subsetting
+  df <- as.data.frame(df)
   num_flags <- sapply(df, is.numeric)
   # ensure we exclude identifiers even if numeric
   num_flags[intersect(names(df), exclude_cols)] <- FALSE
@@ -161,8 +163,7 @@ prepare_feature_matrix <- function(df, exclude_cols = c("mmsi", "is_known_iuu"))
   return(as.data.frame(mat))
 }
 
-# Example pipeline usage:
-# (Uncomment and run the following lines after you have vessel_features_all in your environment)
+# Run pipeline:
 
 df_all <- vessel_features_all  # your dataframe
 features_df <- prepare_feature_matrix(df_all, exclude_cols = c("mmsi", "is_known_iuu"))
@@ -171,7 +172,7 @@ X <- as.matrix(features_df)
 # Set forest parameters
 ntree <- 100
 sample_size <- min(256, nrow(X))  # subsample size
-model <- iForest_train(X, ntree = ntree, sample_size = sample_size, seed = 42)
+model <- iForest_train(X, ntree = ntree, sample_size = sample_size, seed = 8)
 
 scoring <- iForest_score(model, X)
 df_out <- data.frame(
@@ -179,12 +180,34 @@ df_out <- data.frame(
  anomaly_score = scoring$score,
  avg_path = scoring$avg_path
 )
-df_out <- df_out[order(-df_out$anomaly_score), ]
-head(df_out, 30)  # top 30 suspected vessels
+df_out <- df_out[order(-df_out$anomaly_score), S]
 
-# If you have a list of known IUU mmsi:
-#if ("is_known_iuu" %in% names(df_all)) {
- #print(table(df_out$mmsi[1:100] %in% df_all$mmsi[df_all$is_known_iuu]))
-#}
+# ---- Identify top suspected IUU vessels ----
+n_count <- 30
+top_suspected <- vessel_risk %>%
+  top_n(n_count, wt = anomaly_score) %>%
+  select(mmsi, anomaly_score)
 
-# ---------- End of script ----------
+# ---- visualize distribution ----
+hist(df_out$anomaly_score,
+     breaks = 50,
+     main = "Isolation Forest Anomaly Scores",
+     xlab = "Anomaly Score")
+
+# ---- threshold ----
+threshold <- quantile(df_out$anomaly_score, 0.99)  # top 1% most anomalous
+suspected_iuu <- df_out %>%
+  filter(anomaly_score >= threshold)
+
+# ---- results ----
+cat("Top 30 suspected IUU vessels:\n")
+print(top_suspected)
+
+cat("\nNumber of suspected IUU vessels above 99th percentile:", nrow(suspected_iuu), "\n")
+
+# ---- save results ----
+save(df_out, file = "data/mmsi_anomaly_scores.RData")
+# df_out to csv
+fwrite(df_out, file = "data/mmsi_anomaly_scores.csv")
+save(model, file = "data/iso_forest_model.RData")
+save(scoring, file = "data/iso_forest_scoring.RData")

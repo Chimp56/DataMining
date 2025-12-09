@@ -4,6 +4,7 @@ library(dplyr)
 library(purrr)
 library(readr)
 library(DBI)
+library(data.table)
 
 # Initialize DuckDB connection and create database file
 db_path <- "data/db.duckdb"
@@ -147,7 +148,7 @@ create_combined_views <- function(data_types, years) {
 }
 
 # Years of interest
-years <- 2018:2019
+years <- 2017:2019
 data_types <- c("mmsi_daily")
 
 # Load data into DuckDB tables (no memory loading)
