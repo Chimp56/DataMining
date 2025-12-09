@@ -10,19 +10,85 @@ if (!requireNamespace("duckdb", quietly = TRUE)) {
 # Helper Functions
 # =============================================
 
+# Find file with robust path resolution
+find_data_file <- function(filename, subdir = "data") {
+  candidates <- c(
+    file.path(subdir, filename),
+    filename,
+    file.path(getwd(), subdir, filename),
+    file.path(getwd(), filename),
+    file.path(dirname(getwd()), subdir, filename),
+    file.path(dirname(getwd()), filename),
+    file.path("E:/Quantara Drive/DataMining/analysis", subdir, filename)  # Known absolute path
+  )
+  
+  for (candidate in candidates) {
+    if (file.exists(candidate)) {
+      return(normalizePath(candidate))
+    }
+  }
+  
+  return(NULL)
+}
+
+# Find database file (tries both db.duckdb and iuu_hotspots.duckdb)
+find_database_file <- function() {
+  # Try db.duckdb first (the actual file)
+  db_path <- find_data_file("db.duckdb")
+  if (!is.null(db_path)) {
+    return(db_path)
+  }
+  
+  # Fallback to iuu_hotspots.duckdb (for compatibility)
+  db_path <- find_data_file("iuu_hotspots.duckdb")
+  if (!is.null(db_path)) {
+    return(db_path)
+  }
+  
+  return(NULL)
+}
+
 # Find peak month with most fishing activity and AIS events
 find_peak_month <- function(con, start_year = 2017, end_year = 2019) {
-  temporal <- DBI::dbGetQuery(con, glue::glue("
-    SELECT year, month, SUM(fishing_hours) AS hrs
-    FROM fleet_monthly_all
-    WHERE year BETWEEN {start_year} AND {end_year}
-    GROUP BY year, month
-    ORDER BY hrs DESC
-  "))
+  # Try different table/view names
+  table_candidates <- c("fleet_monthly_all", "fleet_monthly_combined", "fleet_monthly_2017")
+  tables <- DBI::dbListTables(con)
+  
+  # Find the best table to use
+  table_name <- NULL
+  for (candidate in table_candidates) {
+    if (candidate %in% tables) {
+      table_name <- candidate
+      break
+    }
+  }
+  
+  # If no combined view, try to use individual year tables
+  if (is.null(table_name)) {
+    year_tables <- paste0("fleet_monthly_", start_year:end_year)
+    available_tables <- year_tables[year_tables %in% tables]
+    if (length(available_tables) > 0) {
+      # Use UNION to combine years
+      union_query <- paste0("SELECT year, month, SUM(fishing_hours) AS hrs FROM (",
+                           paste0("SELECT year, month, fishing_hours FROM ", available_tables, collapse = " UNION ALL "),
+                           ") GROUP BY year, month ORDER BY hrs DESC")
+      temporal <- DBI::dbGetQuery(con, union_query)
+    } else {
+      stop("No fleet_monthly tables found. Available tables: ", paste(tables, collapse = ", "))
+    }
+  } else {
+    temporal <- DBI::dbGetQuery(con, glue::glue("
+      SELECT year, month, SUM(fishing_hours) AS hrs
+      FROM {table_name}
+      WHERE year BETWEEN {start_year} AND {end_year}
+      GROUP BY year, month
+      ORDER BY hrs DESC
+    "))
+  }
   
   # Load AIS events if available
-  ais_path <- "data/ais_disabling_events.csv"
-  if (file.exists(ais_path)) {
+  ais_path <- find_data_file("ais_disabling_events.csv")
+  if (!is.null(ais_path) && file.exists(ais_path)) {
     ais <- read.csv(ais_path, stringsAsFactors = FALSE)
     if ("gap_start_timestamp" %in% names(ais)) {
       ais$ts <- lubridate::ymd_hms(ais$gap_start_timestamp, tz = "UTC")
@@ -46,19 +112,35 @@ find_peak_month <- function(con, start_year = 2017, end_year = 2019) {
 
 # Get fishing cells for a specific month
 get_fishing_cells <- function(con, year, month) {
+  # Try different table/view names
+  tables <- DBI::dbListTables(con)
+  table_candidates <- c("fleet_monthly_all", "fleet_monthly_combined", paste0("fleet_monthly_", year))
+  
+  table_name <- NULL
+  for (candidate in table_candidates) {
+    if (candidate %in% tables) {
+      table_name <- candidate
+      break
+    }
+  }
+  
+  if (is.null(table_name)) {
+    stop("No fleet_monthly table found for year ", year, ". Available tables: ", paste(tables, collapse = ", "))
+  }
+  
   DBI::dbGetQuery(con, glue::glue("
     SELECT (cell_ll_lat + 0.05) AS lat,
            (cell_ll_lon + 0.05) AS lon,
            fishing_hours
-    FROM fleet_monthly_all
+    FROM {table_name}
     WHERE year = {year} AND month = {month} AND fishing_hours > 0
   "))
 }
 
 # Get AIS disabling events for a specific month or year range
 get_ais_events <- function(year = NULL, month = NULL, start_year = NULL, end_year = NULL, mmsi = NULL) {
-  ais_path <- "data/ais_disabling_events.csv"
-  if (!file.exists(ais_path)) {
+  ais_path <- find_data_file("ais_disabling_events.csv")
+  if (is.null(ais_path) || !file.exists(ais_path)) {
     return(data.frame())
   }
   
@@ -207,13 +289,27 @@ cluster_hotspots <- function(df, eps_km = 200, minPts = 6, top_fraction = 0.05) 
 # Get global hotspot data
 get_global_hotspots <- function(start_year = 2017, end_year = 2019) {
   # Connect to database
-  db_path <- "data/iuu_hotspots.duckdb"
-  if (!file.exists(db_path)) {
-    stop("Database file not found: ", db_path)
+  db_path <- find_database_file()
+  if (is.null(db_path) || !file.exists(db_path)) {
+    checked_paths <- c(
+      "data/db.duckdb",
+      "data/iuu_hotspots.duckdb",
+      file.path(getwd(), "data", "db.duckdb"),
+      file.path(getwd(), "data", "iuu_hotspots.duckdb"),
+      "E:/Quantara Drive/DataMining/analysis/data/db.duckdb"
+    )
+    stop("Database file not found. Checked paths:\n  - ", 
+         paste(checked_paths, collapse = "\n  - "),
+         "\nCurrent working directory: ", getwd())
   }
   
+  message("Connecting to database: ", db_path)
   con <- DBI::dbConnect(duckdb::duckdb(db_path))
   on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
+  
+  # Check available tables
+  tables <- DBI::dbListTables(con)
+  message("Available tables in database: ", paste(tables, collapse = ", "))
   
   # Find peak month
   peak <- find_peak_month(con, start_year, end_year)
@@ -264,36 +360,96 @@ get_vessel_hotspots <- function(mmsi, start_year = 2017, end_year = 2019) {
   # This is a simplified version - you may need to adapt based on your data structure
   
   # Try to load from database first
-  db_path <- "data/iuu_hotspots.duckdb"
+  db_path <- find_database_file()
   vessel_data <- data.frame()
   
-  if (file.exists(db_path)) {
+  if (!is.null(db_path) && file.exists(db_path)) {
     con <- DBI::dbConnect(duckdb::duckdb(db_path))
     on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
     
-    # Query vessel data (adjust table/column names as needed)
-    query <- glue::glue("
-      SELECT cell_ll_lat AS lat, cell_ll_lon AS lon, fishing_hours, date
-      FROM mmsi_daily_all
-      WHERE mmsi = '{mmsi}' AND fishing_hours > 0
-      AND year BETWEEN {start_year} AND {end_year}
-    ")
+    # Check available tables
+    tables <- DBI::dbListTables(con)
+    table_candidates <- c("mmsi_daily_all", "mmsi_daily_combined")
+    year_tables <- paste0("mmsi_daily_", start_year:end_year)
+    available_tables <- year_tables[year_tables %in% tables]
     
-    tryCatch({
-      vessel_data <- DBI::dbGetQuery(con, query)
-    }, error = function(e) {
-      # Fallback: try alternative table/column names
-      message("Database query failed, trying alternative...")
-    })
+    # Try to find the right table
+    table_name <- NULL
+    for (candidate in table_candidates) {
+      if (candidate %in% tables) {
+        table_name <- candidate
+        break
+      }
+    }
+    
+    if (!is.null(table_name)) {
+      # Query vessel data
+      query <- glue::glue("
+        SELECT cell_ll_lat AS lat, cell_ll_lon AS lon, fishing_hours, date
+        FROM {table_name}
+        WHERE mmsi = '{mmsi}' AND fishing_hours > 0
+        AND year BETWEEN {start_year} AND {end_year}
+      ")
+      
+      tryCatch({
+        vessel_data <- DBI::dbGetQuery(con, query)
+      }, error = function(e) {
+        message("Database query failed: ", e$message)
+        message("Trying alternative table structure...")
+      })
+    } else if (length(available_tables) > 0) {
+      # Try individual year tables
+      for (year_table in available_tables) {
+        year <- as.numeric(gsub("mmsi_daily_", "", year_table))
+        query <- glue::glue("
+          SELECT cell_ll_lat AS lat, cell_ll_lon AS lon, fishing_hours, date
+          FROM {year_table}
+          WHERE mmsi = '{mmsi}' AND fishing_hours > 0
+        ")
+        tryCatch({
+          year_data <- DBI::dbGetQuery(con, query)
+          if (nrow(year_data) > 0) {
+            vessel_data <- rbind(vessel_data, year_data)
+          }
+        }, error = function(e) {
+          message("Query failed for ", year_table, ": ", e$message)
+        })
+      }
+    } else {
+      message("No mmsi_daily tables found. Available tables: ", paste(tables, collapse = ", "))
+    }
   }
   
   # If no database data, try CSV files
   if (nrow(vessel_data) == 0) {
-    folders <- c(
-      "data/mmsi-daily-csvs-10-v3-2017",
-      "data/mmsi-daily-csvs-10-v3-2018",
-      "data/mmsi-daily-csvs-10-v3-2019"
+    # Try to find CSV folders with robust path resolution
+    base_folders <- c(
+      "data/mmsi-daily-csvs-10-v3",
+      "mmsi-daily-csvs-10-v3",
+      file.path(getwd(), "data", "mmsi-daily-csvs-10-v3"),
+      file.path(dirname(getwd()), "data", "mmsi-daily-csvs-10-v3")
     )
+    
+    folders <- NULL
+    for (base in base_folders) {
+      if (dir.exists(paste0(base, "-2017"))) {
+        folders <- c(
+          paste0(base, "-2017"),
+          paste0(base, "-2018"),
+          paste0(base, "-2019")
+        )
+        break
+      }
+    }
+    
+    if (is.null(folders)) {
+      message("Warning: CSV folders not found. Trying alternative paths...")
+      folders <- c(
+        "data/mmsi-daily-csvs-10-v3-2017",
+        "data/mmsi-daily-csvs-10-v3-2018",
+        "data/mmsi-daily-csvs-10-v3-2019"
+      )
+    }
     
     for (folder in folders) {
       if (dir.exists(folder)) {
