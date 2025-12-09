@@ -1,5 +1,5 @@
-## Plumber API for anomaly scoring using Isolation Forest
-## Start with: plumber::pr("scripts/deploy.R") |> pr_run(port = 8001)
+## Plumber API for R functions
+## Start with: library(plumber); plumber::pr("scripts/deploy.R") |> pr_run(port = 8001)
 
 suppressPackageStartupMessages({
   library(plumber)
