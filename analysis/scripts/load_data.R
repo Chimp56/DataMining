@@ -4,6 +4,7 @@ library(dplyr)
 library(purrr)
 library(readr)
 library(DBI)
+library(data.table)
 
 # Initialize DuckDB connection and create database file
 db_path <- "data/db.duckdb"
@@ -35,6 +36,10 @@ reference_data <- load_reference_data()
 iuu_list <- reference_data$iuu_list
 ais_disabling <- reference_data$ais_disabling
 fishing_vessels_metadata <- reference_data$fishing_vessels_metadata
+
+save(iuu_list, file = "data/iuu_list.RData")
+save(ais_disabling, file = "data/ais_disabling.RData")
+save(fishing_vessels_metadata, file = "data/fishing_vessels_metadata.RData")
 
 # Function to load CSV files into DuckDB table (streaming, no memory loading)
 load_csvs_to_duckdb <- function(directory_path, table_name, pattern = "*.csv") {
@@ -143,8 +148,8 @@ create_combined_views <- function(data_types, years) {
 }
 
 # Years of interest
-years <- 2020:2024
-data_types <- c("fleet_monthly", "mmsi_daily")
+years <- 2017:2019
+data_types <- c("mmsi_daily")
 
 # Load data into DuckDB tables (no memory loading)
 cat("\n=== LOADING DATA INTO DUCKDB ===\n")
@@ -172,74 +177,6 @@ for (table in tables) {
   }
 }
 
-# Quick data exploration using lazy evaluation
-cat("\n=== DATA EXPLORATION (LAZY EVALUATION) ===\n")
-
-# Create lazy connections for data exploration
-if ("fleet_daily_2020" %in% tables) {
-  fleet_daily_lazy <- tbl(con, "fleet_daily_2020")
-  cat("Fleet daily 2020 columns:", paste(colnames(fleet_daily_lazy), collapse = ", "), "\n")
-  cat("Fleet daily 2020 preview:\n")
-  print(head(fleet_daily_lazy, 5))
-}
-
-if ("fleet_monthly_2020" %in% tables) {
-  fleet_monthly_lazy <- tbl(con, "fleet_monthly_2020")
-  cat("Fleet monthly 2020 columns:", paste(colnames(fleet_monthly_lazy), collapse = ", "), "\n")
-  cat("Fleet monthly 2020 preview:\n")
-  print(head(fleet_monthly_lazy, 5))
-}
-
-if ("mmsi_daily_2020" %in% tables) {
-  mmsi_daily_lazy <- tbl(con, "mmsi_daily_2020")
-  cat("MMSI daily 2020 columns:", paste(colnames(mmsi_daily_lazy), collapse = ", "), "\n")
-  cat("MMSI daily 2020 preview:\n")
-  print(head(mmsi_daily_lazy, 5))
-}
-
-# Query functions for working with large datasets
-query_data <- function(sql_query, collect = FALSE, limit = NULL) {
-  if (!is.null(limit)) {
-    sql_query <- paste0("(", sql_query, ") LIMIT ", limit)
-  }
-
-  if (collect) {
-    # Collect results into R memory
-    return(dbGetQuery(con, sql_query))
-  } else {
-    # Return lazy query object
-    return(tbl(con, sql(sql_query)))
-  }
-}
-
-# Function to get sample data for analysis
-get_sample_data <- function(table_name, sample_size = 10000, where_clause = NULL) {
-  sql <- paste0("SELECT * FROM ", table_name)
-
-  if (!is.null(where_clause)) {
-    sql <- paste0(sql, " WHERE ", where_clause)
-  }
-
-  sql <- paste0(sql, " USING SAMPLE ", sample_size, " ROWS")
-
-  return(query_data(sql, collect = TRUE))
-}
-
-# Function to perform aggregations without loading full data
-aggregate_data <- function(table_name, group_by_cols, agg_functions, where_clause = NULL) {
-  sql <- paste0("SELECT ",
-                paste(group_by_cols, collapse = ", "), ", ",
-                paste(agg_functions, collapse = ", "),
-                " FROM ", table_name)
-
-  if (!is.null(where_clause)) {
-    sql <- paste0(sql, " WHERE ", where_clause)
-  }
-
-  sql <- paste0(sql, " GROUP BY ", paste(group_by_cols, collapse = ", "))
-
-  return(query_data(sql, collect = TRUE))
-}
 
 # Function to close connection and cleanup
 cleanup_duckdb <- function() {
@@ -261,26 +198,34 @@ cat("Use aggregate_data() function for memory-efficient aggregations\n")
 cat("Database will be automatically saved when script ends\n")
 
 
-# load all mmsi daily into memory
+# Load all mmsi daily data into memory using for loop
+mmsi_daily_list <- list()
 
-mmsi_daily_2020 <- tbl(con, "mmsi_daily_2020") %>%
-  collect()
-mmsi_daily_2021 <- tbl(con, "mmsi_daily_2021") %>%
-  collect()
-mmsi_daily_2022 <- tbl(con, "mmsi_daily_2022") %>%
-  collect()
-mmsi_daily_2023 <- tbl(con, "mmsi_daily_2023") %>%
-  collect()
-mmsi_daily_2024 <- tbl(con, "mmsi_daily_2024") %>%
-  collect()
+for (year in years) {
+  table_name <- paste0("mmsi_daily_", year)
+  if (table_name %in% dbListTables(con)) {
+    cat("Loading", table_name, "into memory...\n")
+    mmsi_daily_list[[as.character(year)]] <- tbl(con, table_name) %>% collect()
+  }
+}
 
-mmsi_daily <- bind_rows(mmsi_daily_2020, mmsi_daily_2021, mmsi_daily_2022, mmsi_daily_2023, mmsi_daily_2024)
+# Combine all years into single dataset
+mmsi_daily <- bind_rows(mmsi_daily_list)
 
+# Clean up individual year datasets from memory
+rm(mmsi_daily_list)
 
-# delete mmsi daily tables from memory
-
-rm(mmsi_daily_2020, mmsi_daily_2021, mmsi_daily_2022, mmsi_daily_2023, mmsi_daily_2024)
-
+cat("Loaded combined mmsi_daily dataset with", nrow(mmsi_daily), "records\n")
 
 
 
+# number of unique mmsi in mmsi_daily
+length(unique(mmsi_daily$mmsi))
+
+save(mmsi_daily, file = "data/mmsi_daily.RData")
+
+# write all to csvs
+fwrite(mmsi_daily, "data/mmsi_daily.csv")
+fwrite(iuu_list, "data/iuu_list.csv")
+fwrite(ais_disabling, "data/ais_disabling.csv")
+fwrite(fishing_vessels_metadata, "data/fishing_vessels_metadata.csv")

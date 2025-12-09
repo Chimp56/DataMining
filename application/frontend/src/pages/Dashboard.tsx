@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   ExclamationTriangleIcon, 
   MapIcon, 
@@ -9,38 +9,87 @@ import StatsCard from '../components/StatsCard';
 import RecentActivity from '../components/RecentActivity';
 import RiskDistributionChart from '../components/RiskDistributionChart';
 import VesselTypeChart from '../components/VesselTypeChart';
+import { apiService } from '../services/api';
 
 const Dashboard: React.FC = () => {
-  const stats = [
+  const [stats, setStats] = useState([
     {
       name: 'Total Vessels Monitored',
-      value: '2,847',
-      change: '+12%',
+      value: '0',
+      change: '',
       changeType: 'positive' as const,
       icon: MapIcon,
     },
     {
       name: 'High Risk Vessels',
-      value: '156',
-      change: '+8%',
+      value: '0',
+      change: '',
       changeType: 'negative' as const,
       icon: ExclamationTriangleIcon,
     },
     {
       name: 'AIS Disabling Events',
-      value: '1,234',
-      change: '-5%',
+      value: '0',
+      change: '',
       changeType: 'positive' as const,
       icon: ClockIcon,
     },
     {
       name: 'Prediction Accuracy',
-      value: '94.2%',
-      change: '+2.1%',
+      value: '0%',
+      change: '',
       changeType: 'positive' as const,
       icon: ChartBarIcon,
     },
-  ];
+  ]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadDashboardStats();
+  }, []);
+
+  const loadDashboardStats = async () => {
+    try {
+      setLoading(true);
+      const response = await apiService.getDashboardStats();
+      const data = response.data;
+      
+      setStats([
+        {
+          name: 'Total Vessels Monitored',
+          value: data.total_vessels?.toLocaleString() || '0',
+          change: '',
+          changeType: 'positive' as const,
+          icon: MapIcon,
+        },
+        {
+          name: 'High Risk Vessels',
+          value: data.high_risk_vessels?.toLocaleString() || '0',
+          change: '',
+          changeType: 'negative' as const,
+          icon: ExclamationTriangleIcon,
+        },
+        {
+          name: 'AIS Disabling Events',
+          value: data.ais_disabling_events?.toLocaleString() || '0',
+          change: '',
+          changeType: 'positive' as const,
+          icon: ClockIcon,
+        },
+        {
+          name: 'R API Status',
+          value: data.r_api_status === 'connected' ? 'Connected' : 'Disconnected',
+          change: data.r_api_vessels ? `${data.r_api_vessels} vessels` : '',
+          changeType: data.r_api_status === 'connected' ? 'positive' as const : 'negative' as const,
+          icon: ChartBarIcon,
+        },
+      ]);
+    } catch (error) {
+      console.error('Error loading dashboard stats:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div className="space-y-6">

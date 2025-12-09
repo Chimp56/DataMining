@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   ShieldExclamationIcon, 
   ClockIcon, 
@@ -6,10 +6,11 @@ import {
   ExclamationTriangleIcon,
   CheckCircleIcon
 } from '@heroicons/react/24/outline';
+import { apiService } from '../services/api';
 
 interface PredictionResult {
   id: string;
-  vesselName: string;
+  vesselName?: string;
   mmsi: string;
   riskScore: number;
   riskLevel: 'low' | 'medium' | 'high' | 'critical';
@@ -18,14 +19,55 @@ interface PredictionResult {
   predictedBehavior: string;
   timestamp: string;
   status: 'pending' | 'confirmed' | 'false_positive';
+  anomaly_score?: number;
 }
 
 const Predictions: React.FC = () => {
-  const [selectedTimeframe, setSelectedTimeframe] = useState<'24h' | '7d' | '30d'>('24h');
+  const [selectedTimeframe, setSelectedTimeframe] = useState<'24h' | '7d' | '30d' | 'all'>('all');
   const [selectedRisk, setSelectedRisk] = useState<string>('all');
+  const [predictions, setPredictions] = useState<PredictionResult[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Mock prediction data
-  const predictions: PredictionResult[] = [
+  useEffect(() => {
+    loadPredictions();
+  }, [selectedTimeframe, selectedRisk]);
+
+  const loadPredictions = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const response = await apiService.getPredictions({
+        timeframe: selectedTimeframe,
+        riskLevel: selectedRisk === 'all' ? undefined : selectedRisk,
+        limit: 100,
+        offset: 0,
+      });
+      
+      if (response.data && response.data.items) {
+        const items = response.data.items.map((item: any) => ({
+          id: item.id || `pred_${item.mmsi}`,
+          vesselName: item.vesselName || `Vessel ${item.mmsi}`,
+          mmsi: String(item.mmsi),
+          riskScore: item.riskScore || Math.round((item.anomaly_score || 0) * 100),
+          riskLevel: item.risk_level || 'low',
+          confidence: item.confidence || 85,
+          factors: item.factors || [],
+          predictedBehavior: item.predictedBehavior || 'Anomalous behavior detected',
+          timestamp: item.timestamp || new Date().toISOString(),
+          status: item.status || 'pending',
+          anomaly_score: item.anomaly_score,
+        }));
+        setPredictions(items);
+      }
+    } catch (err: any) {
+      setError(err.response?.data?.detail || err.message || 'Failed to load predictions');
+      console.error('Error loading predictions:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+  const mockPredictions = [
     {
       id: '1',
       vesselName: 'Ocean Explorer',
@@ -133,6 +175,7 @@ const Predictions: React.FC = () => {
               onChange={(e) => setSelectedTimeframe(e.target.value as any)}
               className="input-field w-auto"
             >
+              <option value="all">All Time</option>
               <option value="24h">Last 24 Hours</option>
               <option value="7d">Last 7 Days</option>
               <option value="30d">Last 30 Days</option>
@@ -157,7 +200,13 @@ const Predictions: React.FC = () => {
           </div>
 
           <div className="flex gap-2">
-            <button className="btn-primary">Run New Analysis</button>
+            <button 
+              onClick={loadPredictions}
+              className="btn-primary"
+              disabled={loading}
+            >
+              {loading ? 'Loading...' : 'Refresh'}
+            </button>
             <button className="btn-secondary">Export Predictions</button>
           </div>
         </div>
@@ -230,7 +279,9 @@ const Predictions: React.FC = () => {
                   Average Confidence
                 </dt>
                 <dd className="text-2xl font-semibold text-gray-900">
-                  {Math.round(filteredPredictions.reduce((acc, p) => acc + p.confidence, 0) / filteredPredictions.length)}%
+                  {filteredPredictions.length > 0 
+                    ? Math.round(filteredPredictions.reduce((acc, p) => acc + p.confidence, 0) / filteredPredictions.length)
+                    : 0}%
                 </dd>
               </dl>
             </div>
@@ -238,13 +289,31 @@ const Predictions: React.FC = () => {
         </div>
       </div>
 
+      {/* Error Message */}
+      {error && (
+        <div className="card bg-red-50 border-red-200">
+          <p className="text-red-800">Error: {error}</p>
+        </div>
+      )}
+
+      {/* Loading State */}
+      {loading && (
+        <div className="card">
+          <p className="text-gray-600">Loading predictions...</p>
+        </div>
+      )}
+
       {/* Predictions List */}
-      <div className="card">
-        <h3 className="text-lg font-medium text-gray-900 mb-4">
-          Prediction Results ({filteredPredictions.length} predictions)
-        </h3>
-        <div className="space-y-4">
-          {filteredPredictions.map((prediction) => (
+      {!loading && !error && (
+        <div className="card">
+          <h3 className="text-lg font-medium text-gray-900 mb-4">
+            Prediction Results ({filteredPredictions.length} predictions)
+          </h3>
+          {filteredPredictions.length === 0 ? (
+            <p className="text-gray-500">No predictions found for the selected filters.</p>
+          ) : (
+            <div className="space-y-4">
+              {filteredPredictions.map((prediction) => (
             <div
               key={prediction.id}
               className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50"
@@ -304,9 +373,11 @@ const Predictions: React.FC = () => {
                 </div>
               </div>
             </div>
-          ))}
+              ))}
+            </div>
+          )}
         </div>
-      </div>
+      )}
 
       {/* Model Performance */}
       <div className="card">
