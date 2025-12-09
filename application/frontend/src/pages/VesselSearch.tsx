@@ -1,103 +1,79 @@
 import React, { useState } from 'react';
 import { MagnifyingGlassIcon, EyeIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
+import { apiService } from '../services/api';
 
 interface Vessel {
-  id: string;
-  name: string;
   mmsi: string;
-  imo: string;
-  flag: string;
-  type: string;
-  length: number;
-  tonnage: number;
-  risk: 'low' | 'medium' | 'high' | 'critical';
-  lastSeen: string;
-  status: string;
-  owner: string;
-  operator: string;
+  vessel_features?: {
+    flag_ais?: string;
+    flag_registry?: string;
+    flag_gfw?: string;
+    vessel_class_inferred?: string;
+    vessel_class_registry?: string;
+    vessel_class_gfw?: string;
+    length_m_inferred?: number;
+    length_m_registry?: number;
+    length_m_gfw?: number;
+    tonnage_gt_inferred?: number;
+    tonnage_gt_registry?: number;
+    tonnage_gt_gfw?: number;
+    year?: number;
+    is_known_iuu?: boolean;
+    n_disabling_events?: number;
+    total_fishing_hours?: number;
+  };
+  anomaly_score?: number;
+  risk_level?: 'low' | 'medium' | 'high' | 'critical';
+  daily_positions?: Array<{
+    date: string;
+    cell_ll_lat: number;
+    cell_ll_lon: number;
+    hours: number;
+    fishing_hours: number;
+  }>;
 }
 
 const VesselSearch: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
-  const [searchType, setSearchType] = useState<'mmsi' | 'name' | 'imo'>('mmsi');
-  const [results, setResults] = useState<Vessel[]>([]);
-  const [selectedVessel, setSelectedVessel] = useState<Vessel | null>(null);
+  const [vessel, setVessel] = useState<Vessel | null>(null);
   const [loading, setLoading] = useState(false);
-
-  // Mock data - in real app, this would come from API
-  const mockVessels: Vessel[] = [
-    {
-      id: '1',
-      name: 'Ocean Explorer',
-      mmsi: '123456789',
-      imo: '9876543',
-      flag: 'USA',
-      type: 'Trawler',
-      length: 45.2,
-      tonnage: 1200,
-      risk: 'high',
-      lastSeen: '2024-01-15 14:30:00',
-      status: 'Active',
-      owner: 'Ocean Fishing Corp',
-      operator: 'Deep Sea Operations'
-    },
-    {
-      id: '2',
-      name: 'Sea Hunter',
-      mmsi: '987654321',
-      imo: '1234567',
-      flag: 'JPN',
-      type: 'Longliner',
-      length: 38.5,
-      tonnage: 950,
-      risk: 'critical',
-      lastSeen: '2024-01-15 12:15:00',
-      status: 'Active',
-      owner: 'Pacific Fisheries Ltd',
-      operator: 'Marine Ventures Inc'
-    },
-    {
-      id: '3',
-      name: 'Deep Blue',
-      mmsi: '456789123',
-      imo: '7654321',
-      flag: 'GBR',
-      type: 'Purse Seine',
-      length: 52.8,
-      tonnage: 1500,
-      risk: 'medium',
-      lastSeen: '2024-01-15 16:45:00',
-      status: 'Active',
-      owner: 'Atlantic Fishing Co',
-      operator: 'Blue Ocean Ltd'
-    }
-  ];
+  const [error, setError] = useState<string | null>(null);
 
   const handleSearch = async () => {
-    if (!searchTerm.trim()) return;
-    
+    const mmsi = searchTerm.trim();
+    if (!mmsi) {
+      setError('Please enter an MMSI number');
+      return;
+    }
+
+    // Validate MMSI is numeric
+    if (!/^\d+$/.test(mmsi)) {
+      setError('MMSI must be a numeric value');
+      return;
+    }
+
     setLoading(true);
-    // Simulate API call
-    setTimeout(() => {
-      const filtered = mockVessels.filter(vessel => {
-        const searchValue = searchTerm.toLowerCase();
-        switch (searchType) {
-          case 'mmsi':
-            return vessel.mmsi.includes(searchValue);
-          case 'name':
-            return vessel.name.toLowerCase().includes(searchValue);
-          case 'imo':
-            return vessel.imo.includes(searchValue);
-          default:
-            return false;
-        }
-      });
-      setResults(filtered);
+    setError(null);
+    setVessel(null);
+
+    try {
+      const response = await apiService.getVesselDetails(mmsi);
+      if (response.data) {
+        setVessel(response.data);
+      }
+    } catch (err: any) {
+      if (err.response?.status === 404) {
+        setError('Vessel not found with MMSI: ' + mmsi);
+      } else {
+        setError(err.response?.data?.detail || 'Failed to fetch vessel data');
+      }
+      console.error('Error fetching vessel:', err);
+    } finally {
       setLoading(false);
-    }, 1000);
+    }
   };
 
-  const getRiskColor = (risk: string) => {
+  const getRiskColor = (risk?: string) => {
     switch (risk) {
       case 'low': return 'text-green-600 bg-green-100';
       case 'medium': return 'text-yellow-600 bg-yellow-100';
@@ -105,6 +81,38 @@ const VesselSearch: React.FC = () => {
       case 'critical': return 'text-red-600 bg-red-100';
       default: return 'text-gray-600 bg-gray-100';
     }
+  };
+
+  const getVesselName = (v: Vessel) => {
+    return `Vessel ${v.mmsi}`;
+  };
+
+  const getVesselFlag = (v: Vessel) => {
+    return v.vessel_features?.flag_gfw || 
+           v.vessel_features?.flag_registry || 
+           v.vessel_features?.flag_ais || 
+           'Unknown';
+  };
+
+  const getVesselType = (v: Vessel) => {
+    return v.vessel_features?.vessel_class_gfw || 
+           v.vessel_features?.vessel_class_registry || 
+           v.vessel_features?.vessel_class_inferred || 
+           'Unknown';
+  };
+
+  const getVesselLength = (v: Vessel) => {
+    return v.vessel_features?.length_m_gfw || 
+           v.vessel_features?.length_m_registry || 
+           v.vessel_features?.length_m_inferred || 
+           null;
+  };
+
+  const getVesselTonnage = (v: Vessel) => {
+    return v.vessel_features?.tonnage_gt_gfw || 
+           v.vessel_features?.tonnage_gt_registry || 
+           v.vessel_features?.tonnage_gt_inferred || 
+           null;
   };
 
   return (
@@ -121,40 +129,31 @@ const VesselSearch: React.FC = () => {
         <div className="flex flex-col sm:flex-row gap-4">
           <div className="flex-1">
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Search Term
+              MMSI Number
             </label>
             <div className="relative">
               <input
                 type="text"
                 value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Enter MMSI, vessel name, or IMO..."
+                onChange={(e) => {
+                  setSearchTerm(e.target.value);
+                  setError(null);
+                }}
+                placeholder="Enter MMSI number (e.g., 272364000)"
                 className="input-field pl-10"
                 onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
               />
               <MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
             </div>
-          </div>
-          
-          <div className="sm:w-48">
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Search Type
-            </label>
-            <select
-              value={searchType}
-              onChange={(e) => setSearchType(e.target.value as any)}
-              className="input-field"
-            >
-              <option value="mmsi">MMSI</option>
-              <option value="name">Vessel Name</option>
-              <option value="imo">IMO</option>
-            </select>
+            {error && (
+              <p className="mt-1 text-sm text-red-600">{error}</p>
+            )}
           </div>
           
           <div className="flex items-end">
             <button
               onClick={handleSearch}
-              disabled={loading}
+              disabled={loading || !searchTerm.trim()}
               className="btn-primary w-full sm:w-auto"
             >
               {loading ? 'Searching...' : 'Search'}
@@ -163,61 +162,17 @@ const VesselSearch: React.FC = () => {
         </div>
       </div>
 
-      {/* Search Results */}
-      {results.length > 0 && (
-        <div className="card">
-          <h3 className="text-lg font-medium text-gray-900 mb-4">
-            Search Results ({results.length} vessels found)
-          </h3>
-          <div className="space-y-3">
-            {results.map((vessel) => (
-              <div
-                key={vessel.id}
-                className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50 cursor-pointer"
-                onClick={() => setSelectedVessel(vessel)}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-3">
-                      <h4 className="font-medium text-gray-900">{vessel.name}</h4>
-                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${getRiskColor(vessel.risk)}`}>
-                        {vessel.risk.toUpperCase()}
-                      </span>
-                    </div>
-                    <div className="mt-1 text-sm text-gray-600">
-                      <span>MMSI: {vessel.mmsi}</span>
-                      <span className="mx-2">•</span>
-                      <span>IMO: {vessel.imo}</span>
-                      <span className="mx-2">•</span>
-                      <span>Flag: {vessel.flag}</span>
-                      <span className="mx-2">•</span>
-                      <span>Type: {vessel.type}</span>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button className="p-2 text-gray-400 hover:text-gray-600">
-                      <EyeIcon className="h-5 w-5" />
-                    </button>
-                    {vessel.risk === 'high' || vessel.risk === 'critical' && (
-                      <button className="p-2 text-red-400 hover:text-red-600">
-                        <ExclamationTriangleIcon className="h-5 w-5" />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
       {/* Vessel Details */}
-      {selectedVessel && (
+      {vessel && (
         <div className="card">
           <div className="flex items-center justify-between mb-6">
             <h3 className="text-lg font-medium text-gray-900">Vessel Details</h3>
             <button
-              onClick={() => setSelectedVessel(null)}
+              onClick={() => {
+                setVessel(null);
+                setSearchTerm('');
+                setError(null);
+              }}
               className="text-gray-400 hover:text-gray-600"
             >
               ✕
@@ -229,51 +184,69 @@ const VesselSearch: React.FC = () => {
               <h4 className="font-medium text-gray-900 mb-3">Basic Information</h4>
               <dl className="space-y-2">
                 <div>
-                  <dt className="text-sm font-medium text-gray-500">Vessel Name</dt>
-                  <dd className="text-sm text-gray-900">{selectedVessel.name}</dd>
-                </div>
-                <div>
                   <dt className="text-sm font-medium text-gray-500">MMSI</dt>
-                  <dd className="text-sm text-gray-900">{selectedVessel.mmsi}</dd>
-                </div>
-                <div>
-                  <dt className="text-sm font-medium text-gray-500">IMO</dt>
-                  <dd className="text-sm text-gray-900">{selectedVessel.imo}</dd>
+                  <dd className="text-sm text-gray-900">{vessel.mmsi}</dd>
                 </div>
                 <div>
                   <dt className="text-sm font-medium text-gray-500">Flag State</dt>
-                  <dd className="text-sm text-gray-900">{selectedVessel.flag}</dd>
+                  <dd className="text-sm text-gray-900">{getVesselFlag(vessel)}</dd>
                 </div>
                 <div>
                   <dt className="text-sm font-medium text-gray-500">Vessel Type</dt>
-                  <dd className="text-sm text-gray-900">{selectedVessel.type}</dd>
+                  <dd className="text-sm text-gray-900">{getVesselType(vessel)}</dd>
                 </div>
+                {vessel.vessel_features?.year && (
+                  <div>
+                    <dt className="text-sm font-medium text-gray-500">Year</dt>
+                    <dd className="text-sm text-gray-900">{vessel.vessel_features.year}</dd>
+                  </div>
+                )}
+                {vessel.anomaly_score !== undefined && (
+                  <div>
+                    <dt className="text-sm font-medium text-gray-500">Anomaly Score</dt>
+                    <dd className="text-sm text-gray-900">{(vessel.anomaly_score * 100).toFixed(2)}%</dd>
+                  </div>
+                )}
               </dl>
             </div>
             
             <div>
               <h4 className="font-medium text-gray-900 mb-3">Technical Specifications</h4>
               <dl className="space-y-2">
-                <div>
-                  <dt className="text-sm font-medium text-gray-500">Length</dt>
-                  <dd className="text-sm text-gray-900">{selectedVessel.length} meters</dd>
-                </div>
-                <div>
-                  <dt className="text-sm font-medium text-gray-500">Tonnage</dt>
-                  <dd className="text-sm text-gray-900">{selectedVessel.tonnage} GT</dd>
-                </div>
-                <div>
-                  <dt className="text-sm font-medium text-gray-500">Owner</dt>
-                  <dd className="text-sm text-gray-900">{selectedVessel.owner}</dd>
-                </div>
-                <div>
-                  <dt className="text-sm font-medium text-gray-500">Operator</dt>
-                  <dd className="text-sm text-gray-900">{selectedVessel.operator}</dd>
-                </div>
-                <div>
-                  <dt className="text-sm font-medium text-gray-500">Status</dt>
-                  <dd className="text-sm text-gray-900">{selectedVessel.status}</dd>
-                </div>
+                {getVesselLength(vessel) && (
+                  <div>
+                    <dt className="text-sm font-medium text-gray-500">Length</dt>
+                    <dd className="text-sm text-gray-900">{getVesselLength(vessel)?.toFixed(1)} meters</dd>
+                  </div>
+                )}
+                {getVesselTonnage(vessel) && (
+                  <div>
+                    <dt className="text-sm font-medium text-gray-500">Tonnage</dt>
+                    <dd className="text-sm text-gray-900">{getVesselTonnage(vessel)?.toFixed(0)} GT</dd>
+                  </div>
+                )}
+                {vessel.vessel_features?.total_fishing_hours !== undefined && (
+                  <div>
+                    <dt className="text-sm font-medium text-gray-500">Total Fishing Hours</dt>
+                    <dd className="text-sm text-gray-900">{vessel.vessel_features.total_fishing_hours.toFixed(1)}</dd>
+                  </div>
+                )}
+                {vessel.vessel_features?.n_disabling_events !== undefined && (
+                  <div>
+                    <dt className="text-sm font-medium text-gray-500">AIS Disabling Events</dt>
+                    <dd className="text-sm text-gray-900">{vessel.vessel_features.n_disabling_events}</dd>
+                  </div>
+                )}
+                {vessel.vessel_features?.is_known_iuu !== undefined && (
+                  <div>
+                    <dt className="text-sm font-medium text-gray-500">Known IUU Vessel</dt>
+                    <dd className="text-sm text-gray-900">
+                      <span className={vessel.vessel_features.is_known_iuu ? 'text-red-600 font-semibold' : 'text-green-600'}>
+                        {vessel.vessel_features.is_known_iuu ? 'Yes' : 'No'}
+                      </span>
+                    </dd>
+                  </div>
+                )}
               </dl>
             </div>
           </div>
@@ -282,28 +255,71 @@ const VesselSearch: React.FC = () => {
             <div className="flex items-center justify-between">
               <div>
                 <h4 className="font-medium text-gray-900">Risk Assessment</h4>
-                <p className="text-sm text-gray-500">Current risk level and last assessment</p>
+                <p className="text-sm text-gray-500">Anomaly score and risk level</p>
               </div>
-              <span className={`px-3 py-1 rounded-full text-sm font-medium ${getRiskColor(selectedVessel.risk)}`}>
-                {selectedVessel.risk.toUpperCase()} RISK
+              <span className={`px-3 py-1 rounded-full text-sm font-medium ${getRiskColor(vessel.risk_level)}`}>
+                {vessel.risk_level ? vessel.risk_level.toUpperCase() : 'UNKNOWN'} RISK
               </span>
             </div>
-            <div className="mt-4">
-              <p className="text-sm text-gray-600">
-                Last seen: {selectedVessel.lastSeen}
-              </p>
-            </div>
+            {vessel.anomaly_score !== undefined && (
+              <div className="mt-4">
+                <p className="text-sm text-gray-600">
+                  Anomaly Score: <span className="font-semibold">{(vessel.anomaly_score * 100).toFixed(2)}%</span>
+                </p>
+              </div>
+            )}
           </div>
+
+          {vessel.daily_positions && vessel.daily_positions.length > 0 && (
+            <div className="mt-6 pt-6 border-t border-gray-200">
+              <h4 className="font-medium text-gray-900 mb-3">Recent Positions</h4>
+              <div className="max-h-64 overflow-y-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Latitude</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Longitude</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Hours</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Fishing Hours</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {vessel.daily_positions.slice(0, 20).map((pos, idx) => (
+                      <tr key={idx}>
+                        <td className="px-4 py-2 text-sm text-gray-900">{pos.date}</td>
+                        <td className="px-4 py-2 text-sm text-gray-900">{pos.cell_ll_lat.toFixed(2)}</td>
+                        <td className="px-4 py-2 text-sm text-gray-900">{pos.cell_ll_lon.toFixed(2)}</td>
+                        <td className="px-4 py-2 text-sm text-gray-900">{pos.hours.toFixed(2)}</td>
+                        <td className="px-4 py-2 text-sm text-gray-900">{pos.fishing_hours.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {/* No Results */}
-      {results.length === 0 && searchTerm && !loading && (
+      {/* No Results - Show when search was attempted but no vessel found */}
+      {!vessel && !loading && searchTerm && !error && (
         <div className="card text-center py-12">
           <MagnifyingGlassIcon className="mx-auto h-12 w-12 text-gray-400" />
-          <h3 className="mt-2 text-sm font-medium text-gray-900">No vessels found</h3>
+          <h3 className="mt-2 text-sm font-medium text-gray-900">No vessel found</h3>
           <p className="mt-1 text-sm text-gray-500">
-            Try adjusting your search criteria or check the spelling.
+            Enter an MMSI number to search for vessel information.
+          </p>
+        </div>
+      )}
+
+      {/* Initial State */}
+      {!vessel && !loading && !searchTerm && (
+        <div className="card text-center py-12">
+          <MagnifyingGlassIcon className="mx-auto h-12 w-12 text-gray-400" />
+          <h3 className="mt-2 text-sm font-medium text-gray-900">Search for a Vessel</h3>
+          <p className="mt-1 text-sm text-gray-500">
+            Enter an MMSI number above to view vessel details, risk assessment, and position history.
           </p>
         </div>
       )}

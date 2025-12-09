@@ -1,42 +1,100 @@
-import axios from 'axios';
-
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-const api = axios.create({
-  baseURL: API_BASE_URL,
-  timeout: 10000,
-  headers: {
-    'Content-Type': 'application/json',
-  },
-});
-
-// Request interceptor
-api.interceptors.request.use(
-  (config) => {
-    // Add auth token if available
-    const token = localStorage.getItem('authToken');
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
+// Helper function to build query string from params
+function buildQueryString(params: Record<string, any>): string {
+  const searchParams = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      searchParams.append(key, String(value));
     }
-    return config;
-  },
-  (error) => {
-    return Promise.reject(error);
-  }
-);
+  });
+  const queryString = searchParams.toString();
+  return queryString ? `?${queryString}` : '';
+}
 
-// Response interceptor
-api.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    if (error.response?.status === 401) {
+// Helper function to get auth headers
+function getAuthHeaders(): HeadersInit {
+  const headers: HeadersInit = {
+    'Content-Type': 'application/json',
+  };
+  
+  const token = localStorage.getItem('authToken');
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  
+  return headers;
+}
+
+// Helper function to handle response
+async function handleResponse<T>(response: Response): Promise<{ data: T }> {
+  if (!response.ok) {
+    if (response.status === 401) {
       // Handle unauthorized access
       localStorage.removeItem('authToken');
       window.location.href = '/login';
     }
-    return Promise.reject(error);
+    const error = await response.json().catch(() => ({ detail: response.statusText }));
+    throw { response: { status: response.status, data: error } };
   }
-);
+  
+  const data = await response.json();
+  return { data };
+}
+
+// API client using fetch
+const api = {
+  get: async <T = any>(url: string, config?: { params?: Record<string, any> }): Promise<{ data: T }> => {
+    const queryString = config?.params ? buildQueryString(config.params) : '';
+    const fullUrl = `${API_BASE_URL}${url}${queryString}`;
+    
+    const response = await fetch(fullUrl, {
+      method: 'GET',
+      headers: getAuthHeaders(),
+    });
+    
+    return handleResponse<T>(response);
+  },
+  
+  post: async <T = any>(url: string, data?: any): Promise<{ data: T }> => {
+    const response = await fetch(`${API_BASE_URL}${url}`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: data ? JSON.stringify(data) : undefined,
+    });
+    
+    return handleResponse<T>(response);
+  },
+  
+  patch: async <T = any>(url: string, data?: any): Promise<{ data: T }> => {
+    const response = await fetch(`${API_BASE_URL}${url}`, {
+      method: 'PATCH',
+      headers: getAuthHeaders(),
+      body: data ? JSON.stringify(data) : undefined,
+    });
+    
+    return handleResponse<T>(response);
+  },
+  
+  put: async <T = any>(url: string, data?: any): Promise<{ data: T }> => {
+    const response = await fetch(`${API_BASE_URL}${url}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: data ? JSON.stringify(data) : undefined,
+    });
+    
+    return handleResponse<T>(response);
+  },
+  
+  delete: async <T = any>(url: string): Promise<{ data: T }> => {
+    const response = await fetch(`${API_BASE_URL}${url}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    
+    return handleResponse<T>(response);
+  },
+};
 
 // API endpoints
 export const apiService = {
