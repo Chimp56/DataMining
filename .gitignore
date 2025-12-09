@@ -1,5 +1,11 @@
 analysis/data/FishingVessels/
 
+# Large data files (exceed GitHub's 100MB limit)
+analysis/data/vessel_features_all.csv
+analysis/data/*.csv
+analysis/data/*.RData
+analysis/data/*.duckdb
+
 documents/*.docx
 
 application/frontend/node_modules/
