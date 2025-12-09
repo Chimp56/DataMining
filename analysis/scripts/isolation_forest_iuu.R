@@ -136,11 +136,8 @@ iForest_score <- function(model, X) {
   return(list(paths = all_paths, avg_path = avg_paths, score = scores))
 }
 
-# ---------- Example usage with vessel_features_all ----------
-# This section assumes you have a data.frame `vessel_features_all` loaded in the workspace
-# and that it contains at least: 'mmsi' (id) and numeric feature columns to use.
+# ---------- usage with vessel_features_all from build_data.R ----------
 
-# Replace the following with your actual variable
 # load("data/vessel_features_all.RData")  # if you saved it previously
 
 # Prepare numeric feature matrix: drop id and any non-numeric columns
@@ -165,7 +162,7 @@ prepare_feature_matrix <- function(df, exclude_cols = c("mmsi", "is_known_iuu"))
 
 # Run pipeline:
 
-df_all <- vessel_features_all  # your dataframe
+df_all <- vessel_features_all 
 features_df <- prepare_feature_matrix(df_all, exclude_cols = c("mmsi", "is_known_iuu"))
 X <- as.matrix(features_df)
 
