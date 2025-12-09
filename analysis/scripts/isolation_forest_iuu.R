@@ -160,51 +160,57 @@ prepare_feature_matrix <- function(df, exclude_cols = c("mmsi", "is_known_iuu"))
   return(as.data.frame(mat))
 }
 
-# Run pipeline:
+# ---------- only runs if vessel_features_all exists ----------
+# This section is for standalone execution, not when sourced by deploy.R
 
-df_all <- vessel_features_all 
-features_df <- prepare_feature_matrix(df_all, exclude_cols = c("mmsi", "is_known_iuu"))
-X <- as.matrix(features_df)
-
-# Set forest parameters
-ntree <- 100
-sample_size <- min(256, nrow(X))  # subsample size
-model <- iForest_train(X, ntree = ntree, sample_size = sample_size, seed = 8)
-
-scoring <- iForest_score(model, X)
-df_out <- data.frame(
- mmsi = df_all$mmsi,
- anomaly_score = scoring$score,
- avg_path = scoring$avg_path
-)
-df_out <- df_out[order(-df_out$anomaly_score), S]
-
-# ---- Identify top suspected IUU vessels ----
-n_count <- 30
-top_suspected <- vessel_risk %>%
-  top_n(n_count, wt = anomaly_score) %>%
-  select(mmsi, anomaly_score)
-
-# ---- visualize distribution ----
-hist(df_out$anomaly_score,
-     breaks = 50,
-     main = "Isolation Forest Anomaly Scores",
-     xlab = "Anomaly Score")
-
-# ---- threshold ----
-threshold <- quantile(df_out$anomaly_score, 0.99)  # top 1% most anomalous
-suspected_iuu <- df_out %>%
-  filter(anomaly_score >= threshold)
-
-# ---- results ----
-cat("Top 30 suspected IUU vessels:\n")
-print(top_suspected)
-
-cat("\nNumber of suspected IUU vessels above 99th percentile:", nrow(suspected_iuu), "\n")
-
-# ---- save results ----
-save(df_out, file = "data/mmsi_anomaly_scores.RData")
-# df_out to csv
-fwrite(df_out, file = "data/mmsi_anomaly_scores.csv")
-save(model, file = "data/iso_forest_model.RData")
-save(scoring, file = "data/iso_forest_scoring.RData")
+if (exists("vessel_features_all") && !exists("RUN_AS_LIBRARY")) {
+  # Run pipeline:
+  
+  df_all <- vessel_features_all 
+  features_df <- prepare_feature_matrix(df_all, exclude_cols = c("mmsi", "is_known_iuu"))
+  X <- as.matrix(features_df)
+  
+  # Set forest parameters
+  ntree <- 100
+  sample_size <- min(256, nrow(X))  # subsample size
+  model <- iForest_train(X, ntree = ntree, sample_size = sample_size, seed = 8)
+  
+  scoring <- iForest_score(model, X)
+  df_out <- data.frame(
+    mmsi = df_all$mmsi,
+    anomaly_score = scoring$score,
+    avg_path = scoring$avg_path
+  )
+  df_out <- df_out[order(-df_out$anomaly_score), ]
+  
+  # ---- Identify top suspected IUU vessels ----
+  n_count <- 30
+  top_suspected <- df_out %>%
+    top_n(n_count, wt = anomaly_score) %>%
+    select(mmsi, anomaly_score)
+  
+  # ---- visualize distribution ----
+  hist(df_out$anomaly_score,
+       breaks = 50,
+       main = "Isolation Forest Anomaly Scores",
+       xlab = "Anomaly Score")
+  
+  # ---- threshold ----
+  threshold <- quantile(df_out$anomaly_score, 0.99)  # top 1% most anomalous
+  suspected_iuu <- df_out %>%
+    filter(anomaly_score >= threshold)
+  
+  # ---- results ----
+  cat("Top 30 suspected IUU vessels:\n")
+  print(top_suspected)
+  
+  cat("\nNumber of suspected IUU vessels above 99th percentile:", nrow(suspected_iuu), "\n")
+  
+  # ---- save results ----
+  if (requireNamespace("data.table", quietly = TRUE)) {
+    data.table::fwrite(df_out, file = "data/mmsi_anomaly_scores.csv")
+  }
+  save(df_out, file = "data/mmsi_anomaly_scores.RData")
+  save(model, file = "data/iso_forest_model.RData")
+  save(scoring, file = "data/iso_forest_scoring.RData")
+}

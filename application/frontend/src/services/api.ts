@@ -56,8 +56,11 @@ const api = {
     return handleResponse<T>(response);
   },
   
-  post: async <T = any>(url: string, data?: any): Promise<{ data: T }> => {
-    const response = await fetch(`${API_BASE_URL}${url}`, {
+  post: async <T = any>(url: string, data?: any, config?: { params?: Record<string, any> }): Promise<{ data: T }> => {
+    const queryString = config?.params ? buildQueryString(config.params) : '';
+    const fullUrl = `${API_BASE_URL}${url}${queryString}`;
+    
+    const response = await fetch(fullUrl, {
       method: 'POST',
       headers: getAuthHeaders(),
       body: data ? JSON.stringify(data) : undefined,
@@ -172,6 +175,17 @@ export const apiService = {
   
   exportAnalyticsReport: (format: 'pdf' | 'csv' | 'xlsx', period: string) =>
     api.post('/api/export/analytics', { format, period }),
+  
+  // Model training endpoints
+  trainModel: (retrain: boolean = true) =>
+    api.post('/api/model/train', undefined, { params: { retrain: retrain } }),
+  
+  // Hotspot analysis endpoints
+  getGlobalHotspots: (params: { start_year?: number; end_year?: number }) =>
+    api.get('/api/hotspots/global', { params }),
+  
+  getVesselHotspots: (mmsi: string, params: { start_year?: number; end_year?: number }) =>
+    api.get(`/api/hotspots/vessel/${mmsi}`, { params }),
 };
 
 export default api;

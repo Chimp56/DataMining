@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_
 from typing import Optional, List
 from datetime import date, datetime
+import logging
 
 from config import settings
 from database import get_db
@@ -20,6 +21,8 @@ from schemas import (
     PaginatedResponse,
     BoundsQuery
 )
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="DataMining API",
@@ -570,6 +573,37 @@ async def get_model_performance(db: Session = Depends(get_db)):
     }
 
 
+# ==================== Model Training Endpoints ====================
+
+@app.post("/api/model/train")
+async def train_model(
+    retrain: bool = Query(True, description="Force retrain even if model exists")
+):
+    """Train/retrain the Isolation Forest model and save latest scores."""
+    try:
+        result = await r_api_client.train_model(retrain=retrain)
+        
+        if result.get("status") == "error":
+            raise HTTPException(
+                status_code=500,
+                detail=result.get("message", "Failed to train model")
+            )
+        
+        return {
+            "status": "success",
+            "message": "Model trained successfully",
+            "data": result
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error training model: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to train model: {str(e)}"
+        )
+
+
 # ==================== Statistics Endpoints ====================
 
 @app.get("/api/stats/summary")
@@ -613,6 +647,57 @@ async def get_summary_stats(db: Session = Depends(get_db)):
             "iuu_vessels": db.query(func.count(VesselFeatures.id)).filter(VesselFeatures.is_known_iuu == True).scalar(),
         }
     }
+
+
+# ==================== Hotspot Analysis Endpoints ====================
+
+@app.get("/api/hotspots/global")
+async def get_global_hotspots(
+    start_year: int = Query(2017, ge=2010, le=2025),
+    end_year: int = Query(2019, ge=2010, le=2025)
+):
+    """Get global spatial-temporal hotspots."""
+    try:
+        result = await r_api_client.get_global_hotspots(start_year, end_year)
+        if result.get("status") == "error":
+            raise HTTPException(
+                status_code=500,
+                detail=result.get("error", "Failed to get global hotspots")
+            )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting global hotspots: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get global hotspots: {str(e)}"
+        )
+
+
+@app.get("/api/hotspots/vessel/{mmsi}")
+async def get_vessel_hotspots(
+    mmsi: int,
+    start_year: int = Query(2017, ge=2010, le=2025),
+    end_year: int = Query(2019, ge=2010, le=2025)
+):
+    """Get individual vessel hotspots."""
+    try:
+        result = await r_api_client.get_vessel_hotspots(mmsi, start_year, end_year)
+        if result.get("status") == "error":
+            raise HTTPException(
+                status_code=500,
+                detail=result.get("error", "Failed to get vessel hotspots")
+            )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting vessel hotspots: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get vessel hotspots: {str(e)}"
+        )
 
 
 if __name__ == "__main__":

@@ -7,7 +7,8 @@ import {
   ChartBarIcon, 
   ShieldExclamationIcon,
   Bars3Icon,
-  XMarkIcon
+  XMarkIcon,
+  FireIcon
 } from '@heroicons/react/24/outline';
 
 interface LayoutProps {
@@ -23,6 +24,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     { name: 'Vessel Map', href: '/map', icon: MapIcon },
     { name: 'Vessel Search', href: '/search', icon: MagnifyingGlassIcon },
     { name: 'IUU Predictions', href: '/predictions', icon: ShieldExclamationIcon },
+    { name: 'Hotspots', href: '/hotspots', icon: FireIcon },
     { name: 'Analytics', href: '/analytics', icon: ChartBarIcon },
   ];
 

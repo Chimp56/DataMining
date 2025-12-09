@@ -4,7 +4,8 @@ import {
   ClockIcon, 
   ChartBarIcon,
   ExclamationTriangleIcon,
-  CheckCircleIcon
+  CheckCircleIcon,
+  ArrowPathIcon
 } from '@heroicons/react/24/outline';
 import { apiService } from '../services/api';
 
@@ -28,6 +29,8 @@ const Predictions: React.FC = () => {
   const [predictions, setPredictions] = useState<PredictionResult[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [training, setTraining] = useState(false);
+  const [trainingMessage, setTrainingMessage] = useState<string | null>(null);
 
   useEffect(() => {
     loadPredictions();
@@ -67,56 +70,34 @@ const Predictions: React.FC = () => {
       setLoading(false);
     }
   };
-  const mockPredictions = [
-    {
-      id: '1',
-      vesselName: 'Ocean Explorer',
-      mmsi: '123456789',
-      riskScore: 87,
-      riskLevel: 'high',
-      confidence: 92,
-      factors: ['Frequent AIS disabling', 'Identity switching detected', 'Operating in protected area'],
-      predictedBehavior: 'Likely to disable AIS near marine protected area',
-      timestamp: '2024-01-15 14:30:00',
-      status: 'pending'
-    },
-    {
-      id: '2',
-      vesselName: 'Sea Hunter',
-      mmsi: '987654321',
-      riskScore: 95,
-      riskLevel: 'critical',
-      confidence: 98,
-      factors: ['Multiple identity changes', 'IUU vessel list match', 'Suspicious trajectory pattern'],
-      predictedBehavior: 'High probability of IUU fishing activity',
-      timestamp: '2024-01-15 12:15:00',
-      status: 'confirmed'
-    },
-    {
-      id: '3',
-      vesselName: 'Deep Blue',
-      mmsi: '456789123',
-      riskScore: 65,
-      riskLevel: 'medium',
-      confidence: 78,
-      factors: ['Irregular fishing patterns', 'Extended AIS gaps'],
-      predictedBehavior: 'Possible transshipment activity',
-      timestamp: '2024-01-15 16:45:00',
-      status: 'pending'
-    },
-    {
-      id: '4',
-      vesselName: 'Atlantic Star',
-      mmsi: '789123456',
-      riskScore: 45,
-      riskLevel: 'low',
-      confidence: 85,
-      factors: ['Normal fishing patterns'],
-      predictedBehavior: 'Standard fishing operations',
-      timestamp: '2024-01-15 10:20:00',
-      status: 'false_positive'
+
+  const handleTrainModel = async () => {
+    try {
+      setTraining(true);
+      setTrainingMessage(null);
+      setError(null);
+      
+      const response = await apiService.trainModel(true);
+      
+      if (response.data && response.data.status === 'success') {
+        setTrainingMessage(
+          `Model trained successfully! Scores saved to ${response.data.data?.files?.csv_path || 'latest_scores.csv'}. ` +
+          `Training completed at ${new Date(response.data.data?.files?.timestamp || Date.now()).toLocaleString()}.`
+        );
+        // Reload predictions after training
+        setTimeout(() => {
+          loadPredictions();
+        }, 1000);
+      } else {
+        setError(response.data?.message || 'Failed to train model');
+      }
+    } catch (err: any) {
+      setError(err.response?.data?.detail || err.message || 'Failed to train model');
+      console.error('Error training model:', err);
+    } finally {
+      setTraining(false);
     }
-  ];
+  };
 
   const getRiskColor = (risk: string) => {
     switch (risk) {
@@ -203,9 +184,17 @@ const Predictions: React.FC = () => {
             <button 
               onClick={loadPredictions}
               className="btn-primary"
-              disabled={loading}
+              disabled={loading || training}
             >
               {loading ? 'Loading...' : 'Refresh'}
+            </button>
+            <button 
+              onClick={handleTrainModel}
+              className="btn-primary flex items-center gap-2"
+              disabled={training || loading}
+            >
+              <ArrowPathIcon className={`h-4 w-4 ${training ? 'animate-spin' : ''}`} />
+              {training ? 'Training...' : 'Train Model'}
             </button>
             <button className="btn-secondary">Export Predictions</button>
           </div>
@@ -288,6 +277,13 @@ const Predictions: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Training Success Message */}
+      {trainingMessage && (
+        <div className="card bg-green-50 border-green-200">
+          <p className="text-green-800">{trainingMessage}</p>
+        </div>
+      )}
 
       {/* Error Message */}
       {error && (

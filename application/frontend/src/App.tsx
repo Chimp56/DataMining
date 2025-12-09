@@ -5,6 +5,7 @@ import VesselMap from './pages/VesselMap';
 import VesselSearch from './pages/VesselSearch';
 import Predictions from './pages/Predictions';
 import Analytics from './pages/Analytics';
+import Hotspots from './pages/Hotspots';
 import MainPage from './pages/MainPage';
 
 function App() {
@@ -18,6 +19,7 @@ function App() {
           <Route path="/search" element={<VesselSearch />} />
           <Route path="/predictions" element={<Predictions />} />
           <Route path="/analytics" element={<Analytics />} />
+          <Route path="/hotspots" element={<Hotspots />} />
         </Routes>
       </Layout>
     </Router>

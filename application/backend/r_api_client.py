@@ -59,6 +59,49 @@ class RAPIClient:
         except Exception as e:
             logger.error(f"Failed to get score for MMSI {mmsi} from R API: {e}")
             return None
+    
+    async def train_model(self, retrain: bool = True) -> Dict:
+        """Train/retrain the Isolation Forest model and save latest scores."""
+        try:
+            # Use longer timeout for training (model training can take 1-2 minutes)
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                response = await client.post(
+                    f"{self.base_url}/train",
+                    params={"retrain": "true" if retrain else "false"}
+                )
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logger.error(f"Failed to train model via R API: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def get_global_hotspots(self, start_year: int = 2017, end_year: int = 2019) -> Dict:
+        """Get global spatial-temporal hotspots."""
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.get(
+                    f"{self.base_url}/hotspots/global",
+                    params={"start_year": start_year, "end_year": end_year}
+                )
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logger.error(f"Failed to get global hotspots from R API: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def get_vessel_hotspots(self, mmsi: int, start_year: int = 2017, end_year: int = 2019) -> Dict:
+        """Get individual vessel hotspots."""
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.get(
+                    f"{self.base_url}/hotspots/vessel/{mmsi}",
+                    params={"start_year": start_year, "end_year": end_year}
+                )
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logger.error(f"Failed to get vessel hotspots from R API: {e}")
+            return {"status": "error", "message": str(e)}
 
 
 # Global instance
