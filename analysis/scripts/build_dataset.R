@@ -124,11 +124,6 @@ length(unique(iuu_fishing_vessels$MMSI[iuu_fishing_vessels$CurrentlyListed == FA
 # The number of vessels in fishing vessels metadata that was recorded as IUU fishing is 29 out of a total of 192582 vessels (0.015%).
 # This is very sparse data. It wouldn't make sense to perform supervised classification on this dataset.
 
-# Treat this as an anomaly detection problem since most vessels are believed to be operating legally.
-
-# build dataset of behavior features
-# features:
-# - mmsi
 
 # check for outliers in mmsi_daily
 
@@ -526,8 +521,7 @@ library(dplyr)
 # Drop non-feature columns (keep only numeric features)
 vessel_features_numeric <- vessel_features_all %>%
   select(where(is.numeric)) %>%
-  select(-mmsi) %>%   # exclude vessel identifier
-  mutate_all(~ifelse(is.na(.), 0, .))  # replace NA with 0 or impute as needed
+  mutate(across(everything(), ~ ifelse(is.na(.), 0, .)))  # replace NA with 0 or impute as needed
 
 # Scale numeric features (Isolation Forest works better with scaled data)
 vessel_features_scaled <- scale(vessel_features_numeric)
@@ -545,7 +539,7 @@ iso_model <- isolation.forest(
   ntry = 3,              # number of candidate features per split
   prob_pick_avg_gain = 0.5,
   prob_pick_pooled_gain = 0.5,
-  missing_action = "auto",
+  missing_action = "impute",
   seed = 42
 )
 
