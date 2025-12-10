@@ -375,24 +375,6 @@ const Predictions: React.FC = () => {
         </div>
       )}
 
-      {/* Model Performance */}
-      <div className="card">
-        <h3 className="text-lg font-medium text-gray-900 mb-4">Model Performance</h3>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="text-center">
-            <div className="text-3xl font-bold text-green-600">94.2%</div>
-            <div className="text-sm text-gray-500">Overall Accuracy</div>
-          </div>
-          <div className="text-center">
-            <div className="text-3xl font-bold text-blue-600">89.7%</div>
-            <div className="text-sm text-gray-500">Precision</div>
-          </div>
-          <div className="text-center">
-            <div className="text-3xl font-bold text-purple-600">91.3%</div>
-            <div className="text-sm text-gray-500">Recall</div>
-          </div>
-        </div>
-      </div>
     </div>
   );
 };

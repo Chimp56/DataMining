@@ -6,6 +6,9 @@ from sqlalchemy import func, and_, or_
 from typing import Optional, List
 from datetime import date, datetime
 import logging
+import json
+from pathlib import Path
+import pandas as pd
 
 from config import settings
 from database import get_db
@@ -301,6 +304,330 @@ async def get_eez_boundary_by_id(
     return EEZBoundariesResponse.from_orm(boundary)
 
 
+@app.get("/api/map/eez-boundaries")
+async def get_eez_boundaries_for_map(
+    territory1: Optional[str] = Query(None, description="Filter by territory 1"),
+    sovereign1: Optional[str] = Query(None, description="Filter by sovereign 1"),
+    line_type: Optional[str] = Query(None, description="Filter by line type"),
+    limit: int = Query(1000, ge=1, le=5000),
+    db: Session = Depends(get_db)
+):
+    """Get EEZ boundaries data for map display with geometry from shapefile."""
+    try:
+        import geopandas as gpd
+    except ImportError:
+        logger.warning("geopandas not available, returning metadata only")
+        # Fallback to metadata only
+        query = db.query(EEZBoundaries)
+        if territory1:
+            query = query.filter(EEZBoundaries.territory1.ilike(f"%{territory1}%"))
+        if sovereign1:
+            query = query.filter(EEZBoundaries.sovereign1.ilike(f"%{sovereign1}%"))
+        if line_type:
+            query = query.filter(EEZBoundaries.line_type == line_type)
+        items = query.limit(limit).all()
+        return {
+            "items": [{
+                "id": item.id,
+                "line_id": item.line_id,
+                "line_name": item.line_name,
+                "line_type": item.line_type,
+                "territory1": item.territory1,
+                "sovereign1": item.sovereign1,
+                "territory2": item.territory2,
+                "sovereign2": item.sovereign2,
+                "eez1": item.eez1,
+                "eez2": item.eez2,
+                "length_km": item.length_km,
+            } for item in items],
+            "total": len(items),
+            "geometry_available": False
+        }
+    
+    # Try to load geometry from shapefile
+    shapefile_path = Path(__file__).parent.parent.parent / "analysis" / "data" / "World_EEZ_v12_20231025" / "eez_boundaries_v12.shp"
+    
+    if not shapefile_path.exists():
+        logger.warning(f"Shapefile not found at {shapefile_path}, returning metadata only")
+        # Fallback to database query
+        query = db.query(EEZBoundaries)
+        if territory1:
+            query = query.filter(EEZBoundaries.territory1.ilike(f"%{territory1}%"))
+        if sovereign1:
+            query = query.filter(EEZBoundaries.sovereign1.ilike(f"%{sovereign1}%"))
+        if line_type:
+            query = query.filter(EEZBoundaries.line_type == line_type)
+        items = query.limit(limit).all()
+        return {
+            "items": [{
+                "id": item.id,
+                "line_id": item.line_id,
+                "line_name": item.line_name,
+                "line_type": item.line_type,
+                "territory1": item.territory1,
+                "sovereign1": item.sovereign1,
+                "territory2": item.territory2,
+                "sovereign2": item.sovereign2,
+                "eez1": item.eez1,
+                "eez2": item.eez2,
+                "length_km": item.length_km,
+            } for item in items],
+            "total": len(items),
+            "geometry_available": False
+        }
+    
+    try:
+        # Load shapefile
+        gdf = gpd.read_file(str(shapefile_path))
+        gdf = gdf.to_crs(4326)  # Ensure WGS84
+        
+        # Get metadata from database to filter
+        query = db.query(EEZBoundaries)
+        if territory1:
+            query = query.filter(EEZBoundaries.territory1.ilike(f"%{territory1}%"))
+        if sovereign1:
+            query = query.filter(EEZBoundaries.sovereign1.ilike(f"%{sovereign1}%"))
+        if line_type:
+            query = query.filter(EEZBoundaries.line_type == line_type)
+        
+        db_items = query.limit(limit).all()
+        line_ids = [item.line_id for item in db_items if item.line_id is not None]
+        
+        # Filter shapefile by line_ids
+        if line_ids:
+            gdf_filtered = gdf[gdf['LINE_ID'].isin(line_ids)]
+        else:
+            gdf_filtered = gdf.head(limit)
+        
+        # Convert to GeoJSON - use to_json() on the entire filtered dataframe for efficiency
+        items = []
+        if len(gdf_filtered) > 0:
+            # Convert entire filtered GeoDataFrame to GeoJSON
+            geojson_str = gdf_filtered.to_json()
+            geojson_data = json.loads(geojson_str)
+            
+            # Process each feature
+            for feature in geojson_data.get('features', []):
+                props = feature.get('properties', {})
+                geometry = feature.get('geometry')
+                
+                # Find matching database item by LINE_ID
+                line_id = props.get('LINE_ID')
+                db_item = next((item for item in db_items if item.line_id == line_id), None) if line_id else None
+                
+                items.append({
+                    "line_id": int(props.get('LINE_ID', 0)) if props.get('LINE_ID') else None,
+                    "line_name": props.get('LINE_NAME') or (db_item.line_name if db_item else None),
+                    "line_type": props.get('LINE_TYPE') or (db_item.line_type if db_item else None),
+                    "territory1": props.get('TERRITORY1') or (db_item.territory1 if db_item else None),
+                    "sovereign1": props.get('SOVEREIGN1') or (db_item.sovereign1 if db_item else None),
+                    "territory2": props.get('TERRITORY2') or (db_item.territory2 if db_item else None),
+                    "sovereign2": props.get('SOVEREIGN2') or (db_item.sovereign2 if db_item else None),
+                    "eez1": props.get('EEZ1') or (db_item.eez1 if db_item else None),
+                    "eez2": props.get('EEZ2') or (db_item.eez2 if db_item else None),
+                    "length_km": float(props.get('LENGTH_KM', 0)) if props.get('LENGTH_KM') else (db_item.length_km if db_item and db_item.length_km else None),
+                    "geometry": geometry  # GeoJSON geometry
+                })
+        
+        return {
+            "items": items,
+            "total": len(items),
+            "geometry_available": True
+        }
+    except Exception as e:
+        logger.error(f"Error loading shapefile: {e}")
+        # Fallback to database query
+        query = db.query(EEZBoundaries)
+        if territory1:
+            query = query.filter(EEZBoundaries.territory1.ilike(f"%{territory1}%"))
+        if sovereign1:
+            query = query.filter(EEZBoundaries.sovereign1.ilike(f"%{sovereign1}%"))
+        if line_type:
+            query = query.filter(EEZBoundaries.line_type == line_type)
+        items = query.limit(limit).all()
+        return {
+            "items": [{
+                "id": item.id,
+                "line_id": item.line_id,
+                "line_name": item.line_name,
+                "line_type": item.line_type,
+                "territory1": item.territory1,
+                "sovereign1": item.sovereign1,
+                "territory2": item.territory2,
+                "sovereign2": item.sovereign2,
+                "eez1": item.eez1,
+                "eez2": item.eez2,
+                "length_km": item.length_km,
+            } for item in items],
+            "total": len(items),
+            "geometry_available": False,
+            "error": str(e)
+        }
+
+
+@app.get("/api/map/mpa")
+async def get_mpa_for_map(
+    iso3: Optional[str] = Query(None, description="Filter by ISO3 country code"),
+    limit: int = Query(1000, ge=1, le=5000),
+    db: Session = Depends(get_db)
+):
+    """Get MPA data for map display with geometry from shapefile."""
+    try:
+        import geopandas as gpd
+    except ImportError:
+        logger.warning("geopandas not available, returning metadata only")
+        # Fallback to metadata only
+        query = db.query(MPA)
+        if iso3:
+            query = query.filter(MPA.iso3 == iso3.upper())
+        items = query.limit(limit).all()
+        return {
+            "items": [{
+                "id": item.id,
+                "wdpaid": item.wdpaid,
+                "name": item.name,
+                "orig_name": item.orig_name,
+                "desig_eng": item.desig_eng,
+                "iucn_cat": item.iucn_cat,
+                "iso3": item.iso3,
+                "gis_m_area": item.gis_m_area,
+                "status": item.status,
+            } for item in items],
+            "total": len(items),
+            "geometry_available": False
+        }
+    
+    # Try to load geometry from shapefile
+    # MPA shapefiles are split into 3 directories (0, 1, 2)
+    base_data_dir = Path(__file__).parent.parent.parent / "analysis" / "data"
+    mpa_shapefile_paths = []
+    
+    # Check all 3 directories for polygon shapefiles
+    for dir_num in [0, 1, 2]:
+        shapefile_path = base_data_dir / f"WDPA_WDOECM_Oct2025_Public_marine_shp_{dir_num}" / "WDPA_WDOECM_Oct2025_Public_marine_shp-polygons.shp"
+        if shapefile_path.exists():
+            mpa_shapefile_paths.append(shapefile_path)
+            logger.info(f"Found MPA shapefile: {shapefile_path}")
+    
+    # Find existing shapefile directories
+    existing_shapefiles = mpa_shapefile_paths
+    
+    if not existing_shapefiles:
+        logger.warning("MPA shapefiles not found, returning metadata only")
+        query = db.query(MPA)
+        if iso3:
+            query = query.filter(MPA.iso3 == iso3.upper())
+        items = query.limit(limit).all()
+        return {
+            "items": [{
+                "id": item.id,
+                "wdpaid": item.wdpaid,
+                "name": item.name,
+                "orig_name": item.orig_name,
+                "desig_eng": item.desig_eng,
+                "iucn_cat": item.iucn_cat,
+                "iso3": item.iso3,
+                "gis_m_area": item.gis_m_area,
+                "status": item.status,
+            } for item in items],
+            "total": len(items),
+            "geometry_available": False
+        }
+    
+    try:
+        # Load and combine all MPA shapefiles
+        gdf_list = []
+        for shapefile_path in existing_shapefiles:
+            gdf_part = gpd.read_file(str(shapefile_path))
+            gdf_list.append(gdf_part)
+        
+        if gdf_list:
+            gdf = gpd.GeoDataFrame(pd.concat(gdf_list, ignore_index=True))
+            gdf = gdf.to_crs(4326)  # Ensure WGS84
+        else:
+            gdf = gpd.GeoDataFrame()
+        
+        # Get metadata from database to filter
+        query = db.query(MPA)
+        if iso3:
+            query = query.filter(MPA.iso3 == iso3.upper())
+        
+        db_items = query.limit(limit).all()
+        wdpaids = [item.wdpaid for item in db_items if item.wdpaid is not None]
+        
+        # Filter shapefile by WDPAIDs if we have database items
+        if len(gdf) > 0:
+            if wdpaids and 'WDPAID' in gdf.columns:
+                logger.info(f"Filtering MPA by {len(wdpaids)} WDPAIDs from database...")
+                gdf_filtered = gdf[gdf['WDPAID'].isin(wdpaids)]
+                logger.info(f"Found {len(gdf_filtered)} matching MPAs")
+                if len(gdf_filtered) == 0:
+                    # If no matches, take a sample for display
+                    logger.info("No WDPAID matches, using sample for display")
+                    gdf_filtered = gdf.head(min(limit, len(gdf)))
+            else:
+                # No WDPAIDs to filter by, use limit
+                logger.info(f"Using first {limit} MPAs (no WDPAID filter)")
+                gdf_filtered = gdf.head(limit)
+        else:
+            logger.warning("No MPA geometry data available")
+            gdf_filtered = gpd.GeoDataFrame()
+        
+        # Convert to GeoJSON
+        items = []
+        if len(gdf_filtered) > 0:
+            geojson_str = gdf_filtered.to_json()
+            geojson_data = json.loads(geojson_str)
+            
+            for feature in geojson_data.get('features', []):
+                props = feature.get('properties', {})
+                geometry = feature.get('geometry')
+                
+                wdpaid = props.get('WDPAID')
+                db_item = next((item for item in db_items if item.wdpaid == wdpaid), None) if wdpaid else None
+                
+                items.append({
+                    "wdpaid": int(wdpaid) if wdpaid else None,
+                    "name": props.get('NAME') or (db_item.name if db_item else None),
+                    "orig_name": props.get('ORIG_NAME') or (db_item.orig_name if db_item else None),
+                    "desig_eng": props.get('DESIG_ENG') or (db_item.desig_eng if db_item else None),
+                    "iucn_cat": props.get('IUCN_CAT') or (db_item.iucn_cat if db_item else None),
+                    "iso3": props.get('ISO3') or (db_item.iso3 if db_item else None),
+                    "gis_m_area": float(props.get('GIS_M_AREA', 0)) if props.get('GIS_M_AREA') else (db_item.gis_m_area if db_item and db_item.gis_m_area else None),
+                    "status": props.get('STATUS') or (db_item.status if db_item else None),
+                    "geometry": geometry  # GeoJSON geometry
+                })
+        
+        return {
+            "items": items,
+            "total": len(items),
+            "geometry_available": True
+        }
+    except Exception as e:
+        logger.error(f"Error loading MPA shapefile: {e}")
+        # Fallback to database query
+        query = db.query(MPA)
+        if iso3:
+            query = query.filter(MPA.iso3 == iso3.upper())
+        items = query.limit(limit).all()
+        return {
+            "items": [{
+                "id": item.id,
+                "wdpaid": item.wdpaid,
+                "name": item.name,
+                "orig_name": item.orig_name,
+                "desig_eng": item.desig_eng,
+                "iucn_cat": item.iucn_cat,
+                "iso3": item.iso3,
+                "gis_m_area": item.gis_m_area,
+                "status": item.status,
+            } for item in items],
+            "total": len(items),
+            "geometry_available": False,
+            "error": str(e)
+        }
+
+
 # ==================== Vessel Features Endpoints ====================
 
 @app.get("/api/vessel-features", response_model=PaginatedResponse)
@@ -532,16 +859,61 @@ async def get_vessel_details(mmsi: int, db: Session = Depends(get_db)):
     elif anomaly_score and anomaly_score >= 0.6:
         risk_level = "medium"
     
-    # Get daily positions
+    # Get most recent date from mmsi_daily for last_seen
+    last_seen_date = db.query(func.max(MMSIDaily.date)).filter(
+        MMSIDaily.mmsi == mmsi
+    ).scalar()
+    
+    last_seen = None
+    if last_seen_date:
+        # Handle date conversion properly
+        if isinstance(last_seen_date, date):
+            last_seen = last_seen_date.isoformat()
+        elif isinstance(last_seen_date, datetime):
+            last_seen = last_seen_date.isoformat()
+        elif isinstance(last_seen_date, str):
+            last_seen = last_seen_date
+        else:
+            last_seen = str(last_seen_date)
+    
+    # Get daily positions for trajectory
     daily_positions = db.query(MMSIDaily).filter(
         MMSIDaily.mmsi == mmsi
     ).order_by(MMSIDaily.date.desc()).limit(100).all()
     
+    # Build trajectory from daily positions
+    trajectory = []
+    if daily_positions:
+        for pos in reversed(daily_positions):  # Reverse to get chronological order
+            trajectory.append({
+                "lat": pos.cell_ll_lat + 0.05,  # Convert to cell center
+                "lng": pos.cell_ll_lon + 0.05,
+                "timestamp": pos.date.isoformat() if hasattr(pos.date, 'isoformat') else str(pos.date)
+            })
+    
+    # Extract vessel metadata with fallbacks
+    vessel_features_dict = VesselFeaturesResponse.from_orm(vessel).dict()
+    
+    # Determine best values with fallbacks (prefer inferred, then registry, then gfw)
+    flag = vessel_features_dict.get("flag_ais") or vessel_features_dict.get("flag_registry") or vessel_features_dict.get("flag_gfw") or "UNK"
+    vessel_type = vessel_features_dict.get("vessel_class_inferred") or vessel_features_dict.get("vessel_class_registry") or vessel_features_dict.get("vessel_class_gfw") or "Unknown"
+    tonnage = vessel_features_dict.get("tonnage_gt_inferred") or vessel_features_dict.get("tonnage_gt_registry") or vessel_features_dict.get("tonnage_gt_gfw") or 0.0
+    avg_speed = vessel_features_dict.get("mean_speed") or 0.0
+    
     return {
         "mmsi": mmsi,
-        "vessel_features": VesselFeaturesResponse.from_orm(vessel).dict(),
+        "vessel_name": f"Vessel {mmsi}",  # VesselFeatures doesn't have name, using MMSI
+        "vessel_type": vessel_type,
+        "flag": flag,
+        "tonnage": tonnage,
+        "avg_speed": avg_speed,
+        "eez_crossings": vessel_features_dict.get("eez_crossings") or 0,
+        "time_disabled_hours": vessel_features_dict.get("total_disable_hours") or 0.0,
         "anomaly_score": anomaly_score,
         "risk_level": risk_level,
+        "last_seen": last_seen or datetime.now().isoformat(),
+        "trajectory": trajectory,
+        "vessel_features": vessel_features_dict,  # Keep full features for detailed view
         "daily_positions": [MMSIDailyResponse.from_orm(pos).dict() for pos in daily_positions],
         "r_api_available": r_score is not None,
     }
@@ -561,12 +933,23 @@ async def get_model_performance(db: Session = Depends(get_db)):
     ).scalar() or 0
     
     # Calculate approximate metrics (these would be from actual model evaluation)
-    # For now, using placeholder values that could be calculated from validation set
+    # Placeholder values commented out - should be calculated from validation set
+    # return {
+    #     "accuracy": 94.2,
+    #     "precision": 89.7,
+    #     "recall": 91.3,
+    #     "f1_score": 90.5,
+    #     "total_vessels": total_vessels,
+    #     "known_iuu_vessels": known_iuu,
+    #     "r_api_status": "connected" if r_api_available else "disconnected",
+    # }
+    
+    # Return actual metrics from database (placeholder values removed)
     return {
-        "accuracy": 94.2,
-        "precision": 89.7,
-        "recall": 91.3,
-        "f1_score": 90.5,
+        "accuracy": None,  # Should be calculated from model evaluation
+        "precision": None,  # Should be calculated from model evaluation
+        "recall": None,  # Should be calculated from model evaluation
+        "f1_score": None,  # Should be calculated from model evaluation
         "total_vessels": total_vessels,
         "known_iuu_vessels": known_iuu,
         "r_api_status": "connected" if r_api_available else "disconnected",
@@ -697,6 +1080,34 @@ async def get_vessel_hotspots(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get vessel hotspots: {str(e)}"
+        )
+
+
+@app.get("/api/predict/{mmsi}")
+async def predict_vessel_location(
+    mmsi: str,
+    days_ahead: int = Query(5, ge=1, le=30),
+    start_year: int = Query(2017, ge=2010, le=2025),
+    end_year: int = Query(2019, ge=2010, le=2025)
+):
+    """Predict vessel location for next N days."""
+    try:
+        result = await r_api_client.predict_vessel_location(
+            mmsi, days_ahead, start_year, end_year
+        )
+        if result.get("status") == "error":
+            raise HTTPException(
+                status_code=500,
+                detail=result.get("error", "Failed to predict vessel location")
+            )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error predicting vessel location: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to predict vessel location: {str(e)}"
         )
 
 

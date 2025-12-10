@@ -186,6 +186,23 @@ export const apiService = {
   
   getVesselHotspots: (mmsi: string, params: { start_year?: number; end_year?: number }) =>
     api.get(`/api/hotspots/vessel/${mmsi}`, { params }),
+
+  // Vessel location prediction
+  predictVesselLocation: (
+    mmsi: string,
+    params: { days_ahead?: number; start_year?: number; end_year?: number }
+  ) => api.get(`/api/predict/${mmsi}`, { params }),
+
+  // Map data endpoints
+  getEEZBoundariesForMap: (params?: {
+    territory1?: string;
+    sovereign1?: string;
+    line_type?: string;
+    limit?: number;
+  }) => api.get('/api/map/eez-boundaries', { params }),
+
+  getMPAForMap: (params?: { iso3?: string; limit?: number }) =>
+    api.get('/api/map/mpa', { params }),
 };
 
 export default api;

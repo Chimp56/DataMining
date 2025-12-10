@@ -102,6 +102,30 @@ class RAPIClient:
         except Exception as e:
             logger.error(f"Failed to get vessel hotspots from R API: {e}")
             return {"status": "error", "message": str(e)}
+    
+    async def predict_vessel_location(
+        self, 
+        mmsi: str, 
+        days_ahead: int = 5, 
+        start_year: int = 2017, 
+        end_year: int = 2019
+    ) -> Dict:
+        """Predict vessel location for next N days."""
+        try:
+            async with httpx.AsyncClient(timeout=180.0) as client:  # Longer timeout for model training
+                response = await client.get(
+                    f"{self.base_url}/predict/{mmsi}",
+                    params={
+                        "days_ahead": days_ahead,
+                        "start_year": start_year,
+                        "end_year": end_year
+                    }
+                )
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logger.error(f"Failed to predict vessel location from R API: {e}")
+            return {"status": "error", "error": str(e)}
 
 
 # Global instance

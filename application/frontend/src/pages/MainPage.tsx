@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import {
   TileLayer,
   CircleMarker,
@@ -7,6 +7,7 @@ import {
   Tooltip,
 } from 'react-leaflet';
 import MapWrapper from '../components/MapWrapper';
+import { apiService } from '../services/api';
 // Leaflet icon fix is handled globally in src/index.tsx
 
 type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
@@ -63,80 +64,13 @@ const overlays: OverlayLayer[] = [
   },
 ];
 
-const mockVessels: Vessel[] = [
-  {
-    id: '1',
-    name: 'Ocean Explorer',
-    mmsi: '123456789',
-    flag: 'USA',
-    type: 'Trawler',
-    tonnage: 1200,
-    lastSeen: '2024-01-15 14:30 UTC',
-    risk: 'high',
-    anomalyScore: 0.82,
-    avgSpeed: 9.3,
-    eezCrossings: 4,
-    timeDisabledHours: 6.5,
-    trajectory: [
-      { lat: 10.2, lng: -72.1, timestamp: '2024-01-14 06:00' },
-      { lat: 9.8, lng: -71.6, timestamp: '2024-01-14 12:00' },
-      { lat: 9.1, lng: -71.1, timestamp: '2024-01-14 18:00' },
-      { lat: 8.4, lng: -70.4, timestamp: '2024-01-15 00:00' },
-      { lat: 7.9, lng: -69.8, timestamp: '2024-01-15 06:00' },
-    ],
-    predictedPoint: { lat: 7.4, lng: -69.2, eta: '2024-01-15 18:00' },
-  },
-  {
-    id: '2',
-    name: 'Sea Hunter',
-    mmsi: '987654321',
-    flag: 'JPN',
-    type: 'Longliner',
-    tonnage: 950,
-    lastSeen: '2024-01-15 12:15 UTC',
-    risk: 'critical',
-    anomalyScore: 0.91,
-    avgSpeed: 8.1,
-    eezCrossings: 7,
-    timeDisabledHours: 10.2,
-    trajectory: [
-      { lat: -3.5, lng: 146.2, timestamp: '2024-01-14 06:00' },
-      { lat: -3.1, lng: 146.8, timestamp: '2024-01-14 12:00' },
-      { lat: -2.7, lng: 147.4, timestamp: '2024-01-14 18:00' },
-      { lat: -2.4, lng: 148.1, timestamp: '2024-01-15 00:00' },
-      { lat: -2.1, lng: 148.7, timestamp: '2024-01-15 06:00' },
-    ],
-    predictedPoint: { lat: -1.8, lng: 149.1, eta: '2024-01-15 19:00' },
-  },
-  {
-    id: '3',
-    name: 'Deep Blue',
-    mmsi: '456789123',
-    flag: 'GBR',
-    type: 'Purse Seine',
-    tonnage: 1500,
-    lastSeen: '2024-01-15 16:45 UTC',
-    risk: 'medium',
-    anomalyScore: 0.63,
-    avgSpeed: 10.5,
-    eezCrossings: 2,
-    timeDisabledHours: 1.7,
-    trajectory: [
-      { lat: -18.2, lng: -33.1, timestamp: '2024-01-14 06:00' },
-      { lat: -17.4, lng: -32.6, timestamp: '2024-01-14 12:00' },
-      { lat: -16.9, lng: -32.1, timestamp: '2024-01-14 18:00' },
-      { lat: -16.3, lng: -31.4, timestamp: '2024-01-15 00:00' },
-      { lat: -15.7, lng: -30.9, timestamp: '2024-01-15 06:00' },
-    ],
-    predictedPoint: { lat: -15.1, lng: -30.4, eta: '2024-01-15 18:30' },
-  },
-];
-
-const hotspotCenters = [
-  { lat: 8.5, lng: -70.5, intensity: 0.6 },
-  { lat: -2.6, lng: 148.0, intensity: 0.85 },
-  { lat: -16.5, lng: -31.8, intensity: 0.45 },
-];
+// Helper function to determine risk level from anomaly score
+const getRiskFromScore = (score: number): RiskLevel => {
+  if (score >= 0.8) return 'critical';
+  if (score >= 0.6) return 'high';
+  if (score >= 0.4) return 'medium';
+  return 'low';
+};
 
 const riskColor = (risk: RiskLevel) => {
   switch (risk) {
@@ -173,25 +107,164 @@ const MainPage: React.FC = () => {
     eez: true,
     mpa: false,
   });
-  const [selectedVessel, setSelectedVessel] = useState<Vessel>(mockVessels[0]);
+  const [vessels, setVessels] = useState<Vessel[]>([]);
+  const [selectedVessel, setSelectedVessel] = useState<Vessel | null>(null);
   const [mmsiInput, setMmsiInput] = useState('');
   const [reportNotes, setReportNotes] = useState('');
   const [showAggregated, setShowAggregated] = useState(true);
   const [showTrails, setShowTrails] = useState(true);
   const [searchError, setSearchError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [hotspotCenters, setHotspotCenters] = useState<Array<{ lat: number; lng: number; intensity: number }>>([]);
+
+  // Load vessels and hotspots on mount
+  useEffect(() => {
+    loadVessels();
+    loadHotspots();
+  }, []);
+
+  const loadVessels = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      
+      // Fetch predictions which include vessel data with anomaly scores
+      const response = await apiService.getPredictions({
+        timeframe: 'all',
+        limit: 50, // Top 50 vessels by risk
+        offset: 0,
+      });
+      
+      if (response.data && response.data.items) {
+        // Map items to vessels
+        const allVessels: Vessel[] = response.data.items.map((item: any) => {
+          const anomalyScore = item.anomaly_score || 0;
+          const risk = getRiskFromScore(anomalyScore);
+          
+          return {
+            id: item.id || `vessel_${item.mmsi}`,
+            name: item.vesselName || `Vessel ${item.mmsi}`,
+            mmsi: String(item.mmsi),
+            flag: item.flag || 'UNK',
+            type: item.vessel_type || 'Unknown',
+            tonnage: item.tonnage || 0,
+            lastSeen: item.timestamp || new Date().toISOString(),
+            risk: risk,
+            anomalyScore: anomalyScore,
+            avgSpeed: item.avg_speed || 0,
+            eezCrossings: item.eez_crossings || 0,
+            timeDisabledHours: item.time_disabled_hours || 0,
+            trajectory: item.trajectory || [],
+            predictedPoint: item.predicted_point || { lat: 0, lng: 0, eta: '' },
+          };
+        });
+        
+        // Deduplicate by MMSI - keep the one with highest anomaly score
+        const uniqueVesselsMap = new Map<string, Vessel>();
+        for (const vessel of allVessels) {
+          const existing = uniqueVesselsMap.get(vessel.mmsi);
+          if (!existing || vessel.anomalyScore > existing.anomalyScore) {
+            uniqueVesselsMap.set(vessel.mmsi, vessel);
+          }
+        }
+        
+        const vesselData = Array.from(uniqueVesselsMap.values());
+        
+        setVessels(vesselData);
+        if (vesselData.length > 0 && !selectedVessel) {
+          setSelectedVessel(vesselData[0]);
+        }
+      }
+    } catch (err: any) {
+      setError(err.response?.data?.detail || err.message || 'Failed to load vessels');
+      console.error('Error loading vessels:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadHotspots = async () => {
+    try {
+      const response = await apiService.getGlobalHotspots({
+        start_year: 2017,
+        end_year: 2019,
+      });
+      
+      if (response.data && response.data.fishing_hotspots) {
+        const hotspots = response.data.fishing_hotspots.map((hotspot: any) => ({
+          lat: hotspot.lat || 0,
+          lng: hotspot.lon || 0,
+          intensity: Math.min(1.0, (hotspot.count || 0) / 100), // Normalize intensity
+        }));
+        setHotspotCenters(hotspots.slice(0, 10)); // Limit to top 10
+      }
+    } catch (err: any) {
+      console.error('Error loading hotspots:', err);
+      // Don't set error state for hotspots, just log
+    }
+  };
 
   const vesselList = useMemo(
-    () => [...mockVessels].sort((a, b) => b.anomalyScore - a.anomalyScore),
-    []
+    () => [...vessels].sort((a, b) => b.anomalyScore - a.anomalyScore),
+    [vessels]
   );
 
-  const handleMmsiLookup = () => {
-    const match = vesselList.find((v) => v.mmsi === mmsiInput.trim());
-    if (match) {
-      setSelectedVessel(match);
+  const handleMmsiLookup = async () => {
+    const mmsi = mmsiInput.trim();
+    if (!mmsi) {
+      setSearchError('Please enter an MMSI');
+      return;
+    }
+    
+    try {
       setSearchError('');
-    } else {
-      setSearchError('No vessel found with that MMSI');
+      const response = await apiService.getVesselDetails(mmsi);
+      
+      if (response.data) {
+        const item = response.data;
+        const anomalyScore = item.anomaly_score || 0;
+        const risk = getRiskFromScore(anomalyScore);
+        
+        const vessel: Vessel = {
+          id: `vessel_${mmsi}`,
+          name: item.vessel_name || `Vessel ${mmsi}`,
+          mmsi: String(mmsi),
+          flag: item.flag || 'UNK',
+          type: item.vessel_type || 'Unknown',
+          tonnage: item.tonnage || 0,
+          lastSeen: item.last_seen || new Date().toISOString(),
+          risk: risk,
+          anomalyScore: anomalyScore,
+          avgSpeed: item.avg_speed || 0,
+          eezCrossings: item.eez_crossings || 0,
+          timeDisabledHours: item.time_disabled_hours || 0,
+          trajectory: item.trajectory || [],
+          predictedPoint: item.predicted_point || { lat: 0, lng: 0, eta: '' },
+        };
+        
+        console.log('Vessel details loaded:', {
+          mmsi,
+          vessel_name: item.vessel_name,
+          vessel_type: item.vessel_type,
+          flag: item.flag,
+          tonnage: item.tonnage,
+          avg_speed: item.avg_speed,
+          eez_crossings: item.eez_crossings,
+          time_disabled_hours: item.time_disabled_hours,
+          trajectory_length: item.trajectory?.length || 0,
+          vessel_features: item.vessel_features ? 'present' : 'missing'
+        });
+        
+        setSelectedVessel(vessel);
+        // Add to vessels list if not already there
+        if (!vessels.find(v => v.mmsi === mmsi)) {
+          setVessels(prev => [...prev, vessel]);
+        }
+      }
+    } catch (err: any) {
+      setSearchError(err.response?.data?.detail || 'No vessel found with that MMSI');
+      console.error('Error looking up vessel:', err);
     }
   };
 
@@ -217,7 +290,6 @@ const MainPage: React.FC = () => {
                 <h3 className="text-lg font-medium text-gray-900">Overlays</h3>
                 <p className="text-sm text-gray-500">Spatial context layers</p>
               </div>
-              <div className="text-xs text-gray-500 uppercase tracking-wide">Sidebar</div>
             </div>
             <div className="space-y-3">
               {overlays.map((layer) => (
@@ -288,11 +360,21 @@ const MainPage: React.FC = () => {
               <span className="text-xs text-gray-500">Ranked by anomaly</span>
             </div>
             <div className="space-y-2">
-              {vesselList.map((vessel) => (
+              {loading && (
+                <div className="text-center py-4">
+                  <p className="text-sm text-gray-500">Loading vessels...</p>
+                </div>
+              )}
+              {!loading && vesselList.length === 0 && (
+                <div className="text-center py-4">
+                  <p className="text-sm text-gray-500">No vessels found</p>
+                </div>
+              )}
+              {!loading && vesselList.map((vessel) => (
                 <div
                   key={vessel.id}
                   className={`flex items-center justify-between p-3 rounded-lg border cursor-pointer transition-colors ${
-                    vessel.id === selectedVessel.id
+                    selectedVessel && vessel.id === selectedVessel.id
                       ? 'border-primary-200 bg-primary-50'
                       : 'border-gray-200 hover:bg-gray-50'
                   }`}
@@ -364,8 +446,9 @@ const MainPage: React.FC = () => {
                   </CircleMarker>
                 ))}
 
-              {mockVessels.map((vessel) => {
-                const isSelected = vessel.id === selectedVessel.id;
+              {vessels.map((vessel) => {
+                if (!vessel.trajectory || vessel.trajectory.length === 0) return null;
+                const isSelected = selectedVessel && vessel.id === selectedVessel.id;
                 const lastPoint = vessel.trajectory[vessel.trajectory.length - 1];
                 return (
                   <React.Fragment key={vessel.id}>
@@ -452,6 +535,23 @@ const MainPage: React.FC = () => {
 
           <div className="grid gap-4 md:grid-cols-3">
             <div className="card md:col-span-2">
+              {loading && (
+                <div className="text-center py-8">
+                  <p className="text-gray-500">Loading vessels...</p>
+                </div>
+              )}
+              {error && (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
+                  <p className="text-red-800">{error}</p>
+                </div>
+              )}
+              {!loading && !selectedVessel && (
+                <div className="text-center py-8">
+                  <p className="text-gray-500">No vessel selected. Search for a vessel or select one from the list.</p>
+                </div>
+              )}
+              {!loading && selectedVessel && (
+                <>
               <div className="flex items-start justify-between mb-4">
                 <div>
                   <h3 className="text-lg font-medium text-gray-900">Vessel Detail and Summary</h3>
@@ -523,18 +623,24 @@ const MainPage: React.FC = () => {
                 <div className="rounded-lg border border-gray-200 p-3">
                   <p className="text-xs text-gray-500 uppercase mb-1">Trajectory Points</p>
                   <p className="text-sm text-gray-900">
-                    {selectedVessel.trajectory.length} historical positions plotted with playback.
+                    {selectedVessel.trajectory?.length || 0} historical positions plotted with playback.
                   </p>
                 </div>
                 <div className="rounded-lg border border-gray-200 p-3">
                   <p className="text-xs text-gray-500 uppercase mb-1">Predicted Position</p>
-                  <p className="text-sm text-gray-900">
-                    Next day ETA {selectedVessel.predictedPoint.eta} at{' '}
-                    {selectedVessel.predictedPoint.lat.toFixed(2)},{' '}
-                    {selectedVessel.predictedPoint.lng.toFixed(2)}.
-                  </p>
+                  {selectedVessel.predictedPoint && selectedVessel.predictedPoint.eta ? (
+                    <p className="text-sm text-gray-900">
+                      Next day ETA {selectedVessel.predictedPoint.eta} at{' '}
+                      {selectedVessel.predictedPoint.lat?.toFixed(2) || 'N/A'},{' '}
+                      {selectedVessel.predictedPoint.lng?.toFixed(2) || 'N/A'}.
+                    </p>
+                  ) : (
+                    <p className="text-sm text-gray-500">No prediction available</p>
+                  )}
                 </div>
               </div>
+                </>
+              )}
             </div>
 
             <div className="card space-y-3">

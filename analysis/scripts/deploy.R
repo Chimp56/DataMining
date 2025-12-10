@@ -47,6 +47,33 @@ load_isolation_forest <- function() {
 
 load_isolation_forest()
 
+# ---------- Load cache utilities ----------
+cache_utils_path <- NULL
+if (file.exists("scripts/cache_utils.R")) {
+  cache_utils_path <- normalizePath("scripts/cache_utils.R")
+} else if (file.exists("cache_utils.R")) {
+  cache_utils_path <- normalizePath("cache_utils.R")
+} else {
+  base_dir <- getwd()
+  if (file.exists(file.path(base_dir, "scripts", "cache_utils.R"))) {
+    cache_utils_path <- normalizePath(file.path(base_dir, "scripts", "cache_utils.R"))
+  } else if (file.exists(file.path(base_dir, "cache_utils.R"))) {
+    cache_utils_path <- normalizePath(file.path(base_dir, "cache_utils.R"))
+  } else {
+    parent_dir <- dirname(base_dir)
+    if (file.exists(file.path(parent_dir, "scripts", "cache_utils.R"))) {
+      cache_utils_path <- normalizePath(file.path(parent_dir, "scripts", "cache_utils.R"))
+    }
+  }
+}
+
+if (!is.null(cache_utils_path) && file.exists(cache_utils_path)) {
+  source(cache_utils_path, local = TRUE)
+  message("Cache utilities loaded")
+} else {
+  message("Warning: cache_utils.R not found. Caching will be disabled.")
+}
+
 # ---------- Load hotspot analysis functions ----------
 hotspot_analysis_path <- NULL
 if (file.exists("scripts/hotspot_analysis.R")) {
@@ -72,6 +99,33 @@ if (!is.null(hotspot_analysis_path) && file.exists(hotspot_analysis_path)) {
   message("Hotspot analysis functions loaded")
 } else {
   message("Warning: hotspot_analysis.R not found. Hotspot endpoints will not be available.")
+}
+
+# ---------- Load vessel prediction functions ----------
+vessel_prediction_path <- NULL
+if (file.exists("scripts/vessel_prediction.R")) {
+  vessel_prediction_path <- normalizePath("scripts/vessel_prediction.R")
+} else if (file.exists("vessel_prediction.R")) {
+  vessel_prediction_path <- normalizePath("vessel_prediction.R")
+} else {
+  base_dir <- getwd()
+  if (file.exists(file.path(base_dir, "scripts", "vessel_prediction.R"))) {
+    vessel_prediction_path <- normalizePath(file.path(base_dir, "scripts", "vessel_prediction.R"))
+  } else if (file.exists(file.path(base_dir, "vessel_prediction.R"))) {
+    vessel_prediction_path <- normalizePath(file.path(base_dir, "vessel_prediction.R"))
+  } else {
+    parent_dir <- dirname(base_dir)
+    if (file.exists(file.path(parent_dir, "scripts", "vessel_prediction.R"))) {
+      vessel_prediction_path <- normalizePath(file.path(parent_dir, "scripts", "vessel_prediction.R"))
+    }
+  }
+}
+
+if (!is.null(vessel_prediction_path) && file.exists(vessel_prediction_path)) {
+  source(vessel_prediction_path, local = TRUE)
+  message("Vessel prediction functions loaded")
+} else {
+  message("Warning: vessel_prediction.R not found. Prediction endpoints will not be available.")
 }
 
 # ---------- Helper functions ----------
@@ -552,8 +606,9 @@ function(start_year = 2017, end_year = 2019) {
 #* @param mmsi MMSI identifier
 #* @param start_year:int Start year (default: 2017)
 #* @param end_year:int End year (default: 2019)
+#* @param use_cache:logical Use cached results if available (default: TRUE)
 #* @get /hotspots/vessel/<mmsi>
-function(mmsi, start_year = 2017, end_year = 2019) {
+function(mmsi, start_year = 2017, end_year = 2019, use_cache = TRUE) {
   if (!exists("get_vessel_hotspots")) {
     return(list(error = "Hotspot analysis functions not loaded"))
   }
@@ -562,8 +617,28 @@ function(mmsi, start_year = 2017, end_year = 2019) {
     mmsi_num <- as.character(mmsi)
     start_year <- as.integer(start_year)
     end_year <- as.integer(end_year)
+    use_cache <- as.logical(use_cache)
+    if (is.na(use_cache)) use_cache <- TRUE
     
-    result <- get_vessel_hotspots(mmsi_num, start_year, end_year)
+    # Check cache
+    cache_key <- make_cache_key("vessel_hotspots", mmsi = mmsi_num, start_year = start_year, end_year = end_year)
+    if (use_cache && exists("cache_exists") && cache_exists(cache_key)) {
+      cached <- load_cache(cache_key)
+      if (!is.null(cached) && "result" %in% names(cached)) {
+        message("Returning cached vessel hotspots for MMSI ", mmsi_num, " (", start_year, "-", end_year, ")")
+        result <- cached$result
+      } else {
+        result <- get_vessel_hotspots(mmsi_num, start_year, end_year)
+        if (exists("save_cache")) {
+          save_cache(cache_key, result = result)
+        }
+      }
+    } else {
+      result <- get_vessel_hotspots(mmsi_num, start_year, end_year)
+      if (exists("save_cache")) {
+        save_cache(cache_key, result = result)
+      }
+    }
     
     # Convert data.frames to lists for JSON serialization
     list(
@@ -587,6 +662,122 @@ function(mmsi, start_year = 2017, end_year = 2019) {
         list()
       },
       summary = result$summary
+    )
+  }, error = function(e) {
+    list(
+      status = "error",
+      error = e$message
+    )
+  })
+}
+
+# ==================== Vessel Prediction Endpoints ====================
+
+#* Predict vessel location for next N days
+#* @param mmsi MMSI identifier
+#* @param days_ahead:int Number of days to predict ahead (default: 5)
+#* @param start_year:int Start year for training data (default: 2017)
+#* @param end_year:int End year for training data (default: 2019)
+#* @param use_cache:logical Use cached results if available (default: TRUE)
+#* @get /predict/<mmsi>
+function(mmsi, days_ahead = 5, start_year = 2017, end_year = 2019, use_cache = TRUE) {
+  if (!exists("predict_vessel_location")) {
+    return(list(error = "Vessel prediction functions not loaded"))
+  }
+  
+  tryCatch({
+    mmsi_num <- as.character(mmsi)
+    days_ahead <- as.integer(days_ahead)
+    start_year <- as.integer(start_year)
+    end_year <- as.integer(end_year)
+    use_cache <- as.logical(use_cache)
+    if (is.na(use_cache)) use_cache <- TRUE
+    
+    # Check cache for prediction result
+    cache_key <- make_cache_key("vessel_prediction", mmsi = mmsi_num, days_ahead = days_ahead, 
+                                 start_year = start_year, end_year = end_year)
+    if (use_cache && exists("cache_exists") && cache_exists(cache_key)) {
+      cached <- load_cache(cache_key)
+      if (!is.null(cached) && "result" %in% names(cached)) {
+        message("Returning cached prediction for MMSI ", mmsi_num, " (", days_ahead, " days, ", 
+                start_year, "-", end_year, ")")
+        result <- cached$result
+      } else {
+        result <- predict_vessel_location(mmsi_num, days_ahead, start_year, end_year)
+        if (exists("save_cache")) {
+          save_cache(cache_key, result = result)
+        }
+      }
+    } else {
+      result <- predict_vessel_location(mmsi_num, days_ahead, start_year, end_year)
+      if (exists("save_cache")) {
+        save_cache(cache_key, result = result)
+      }
+    }
+    
+    # Convert data.frames to lists for JSON serialization
+    list(
+      status = result$status,
+      mmsi = result$mmsi,
+      observed = lapply(1:nrow(result$observed), function(i) {
+        as.list(result$observed[i, ])
+      }),
+      predictions = lapply(1:nrow(result$predictions), function(i) {
+        as.list(result$predictions[i, ])
+      }),
+      model_metrics = result$model_metrics,
+      last_known_position = result$last_known_position
+    )
+  }, error = function(e) {
+    list(
+      status = "error",
+      error = e$message
+    )
+  })
+}
+
+# ==================== Cache Management Endpoints ====================
+
+#* Get cache information
+#* @param prefix Filter by cache prefix (e.g., "global_hotspots", "vessel_prediction")
+#* @get /cache/info
+function(prefix = NULL) {
+  if (!exists("get_cache_info")) {
+    return(list(error = "Cache utilities not loaded"))
+  }
+  
+  tryCatch({
+    info <- get_cache_info(prefix = prefix)
+    list(
+      status = "success",
+      cache_info = info
+    )
+  }, error = function(e) {
+    list(
+      status = "error",
+      error = e$message
+    )
+  })
+}
+
+#* Clear old cache files
+#* @param prefix Filter by cache prefix
+#* @param max_age_hours Maximum age in hours (default: 168 = 1 week)
+#* @post /cache/clear
+function(prefix = NULL, max_age_hours = 168) {
+  if (!exists("clear_old_cache")) {
+    return(list(error = "Cache utilities not loaded"))
+  }
+  
+  tryCatch({
+    max_age_hours <- as.numeric(max_age_hours)
+    if (is.na(max_age_hours)) max_age_hours <- 168
+    
+    deleted <- clear_old_cache(prefix = prefix, max_age_hours = max_age_hours)
+    list(
+      status = "success",
+      deleted_count = deleted,
+      message = paste("Deleted", deleted, "cache files")
     )
   }, error = function(e) {
     list(

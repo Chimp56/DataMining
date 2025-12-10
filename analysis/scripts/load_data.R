@@ -149,7 +149,7 @@ create_combined_views <- function(data_types, years) {
 
 # Years of interest
 years <- 2017:2019
-data_types <- c("mmsi_daily")
+data_types <- c("mmsi_daily", "fleet_monthly")
 
 # Load data into DuckDB tables (no memory loading)
 cat("\n=== LOADING DATA INTO DUCKDB ===\n")
