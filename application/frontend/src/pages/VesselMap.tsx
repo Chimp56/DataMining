@@ -164,6 +164,78 @@ const VesselMap: React.FC = () => {
       } catch (mpaErr) {
         console.error('Error loading MPA data:', mpaErr);
       }
+
+      // Load vessels data from predictions
+      try {
+        const predictionsResponse = await apiService.getPredictions({
+          timeframe: 'all',
+          limit: 100,
+          offset: 0,
+        });
+        console.log('Predictions Response:', predictionsResponse);
+        if (predictionsResponse.data && predictionsResponse.data.items) {
+          // Map predictions directly to vessels (locations are now included in response)
+          const vesselData: Vessel[] = predictionsResponse.data.items
+            .filter((item: any) => {
+              // Only include vessels with valid coordinates
+              return item.lat != null && item.lng != null && item.lat !== 0 && item.lng !== 0;
+            })
+            .map((item: any) => {
+              const mmsi = String(item.mmsi);
+              
+              // Determine risk level from anomaly score
+              const anomalyScore = item.anomaly_score || 0;
+              let risk: 'low' | 'medium' | 'high' | 'critical' = 'low';
+              if (anomalyScore >= 0.9) risk = 'critical';
+              else if (anomalyScore >= 0.75) risk = 'high';
+              else if (anomalyScore >= 0.6) risk = 'medium';
+              else if (anomalyScore >= 0.4) risk = 'medium';
+              
+              return {
+                id: `vessel_${mmsi}`,
+                name: item.vesselName || `Vessel ${mmsi}`,
+                mmsi: mmsi,
+                lat: item.lat,
+                lng: item.lng,
+                risk: risk,
+                type: item.vessel_features?.vessel_class_inferred || 'Unknown',
+                flag: item.vessel_features?.flag_ais || 'UNK',
+                lastSeen: item.last_seen || item.timestamp || new Date().toISOString(),
+              };
+            });
+          
+          console.log(`Loaded ${vesselData.length} vessels with valid positions`);
+          setVessels(vesselData);
+        } else {
+          console.warn('Predictions response missing items:', predictionsResponse);
+        }
+      } catch (vesselErr) {
+        console.error('Error loading vessels data:', vesselErr);
+      }
+
+      // Load AIS events data
+      try {
+        const aisResponse = await apiService.getAISEvents();
+        console.log('AIS Events Response:', aisResponse);
+        if (aisResponse.data && aisResponse.data.items) {
+          const aisData: AISEvent[] = aisResponse.data.items.map((item: any, index: number) => ({
+            id: item.id || `ais_${index}`,
+            mmsi: String(item.mmsi || ''),
+            lat: item.lat || item.cell_ll_lat || 0,
+            lng: item.lng || item.cell_ll_lon || 0,
+            duration: item.duration || item.hours || 0,
+            startTime: item.start_time || item.startTime || item.date || '',
+            endTime: item.end_time || item.endTime || item.date || '',
+          })).filter((e: AISEvent) => e.lat !== 0 && e.lng !== 0);
+          
+          console.log(`Loaded ${aisData.length} AIS events with valid positions`);
+          setAisEvents(aisData);
+        } else {
+          console.warn('AIS events response missing items:', aisResponse);
+        }
+      } catch (aisErr) {
+        console.error('Error loading AIS events data:', aisErr);
+      }
     } catch (err: any) {
       setError(err.response?.data?.detail || err.message || 'Failed to load map data');
       console.error('Error loading map data:', err);
@@ -316,7 +388,7 @@ const VesselMap: React.FC = () => {
             </p>
             {eezBoundariesData.length > 0 && (
               <p className="text-sm text-blue-600 mt-2">
-                ℹ️ EEZ boundaries loaded. Note: Boundary lines require geometry data to display on map.
+                 EEZ boundaries loaded. Note: Boundary lines require geometry data to display on map.
               </p>
             )}
           </CardContent>

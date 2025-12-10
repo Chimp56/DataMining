@@ -38,8 +38,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 
@@ -403,7 +404,19 @@ async def get_eez_boundaries_for_map(
         items = []
         if len(gdf_filtered) > 0:
             # Convert entire filtered GeoDataFrame to GeoJSON
-            geojson_str = gdf_filtered.to_json()
+            # Remove any date/timestamp columns that might cause serialization issues
+            gdf_for_json = gdf_filtered.copy()
+            for col in gdf_for_json.columns:
+                if col != 'geometry' and gdf_for_json[col].dtype.name in ['datetime64[ns]', 'object']:
+                    # Check if column contains datetime objects
+                    try:
+                        # Try to convert to string if it's a datetime column
+                        if pd.api.types.is_datetime64_any_dtype(gdf_for_json[col]):
+                            gdf_for_json[col] = gdf_for_json[col].astype(str)
+                    except:
+                        pass
+            
+            geojson_str = gdf_for_json.to_json()
             geojson_data = json.loads(geojson_str)
             
             # Process each feature
@@ -435,7 +448,9 @@ async def get_eez_boundaries_for_map(
             "geometry_available": True
         }
     except Exception as e:
-        logger.error(f"Error loading shapefile: {e}")
+        logger.error(f"Error loading EEZ boundaries shapefile: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         # Fallback to database query
         query = db.query(EEZBoundaries)
         if territory1:
@@ -445,8 +460,10 @@ async def get_eez_boundaries_for_map(
         if line_type:
             query = query.filter(EEZBoundaries.line_type == line_type)
         items = query.limit(limit).all()
-        return {
-            "items": [{
+        # Convert items to dicts, ensuring all fields are JSON serializable
+        items_dict = []
+        for item in items:
+            item_dict = {
                 "id": item.id,
                 "line_id": item.line_id,
                 "line_name": item.line_name,
@@ -457,8 +474,11 @@ async def get_eez_boundaries_for_map(
                 "sovereign2": item.sovereign2,
                 "eez1": item.eez1,
                 "eez2": item.eez2,
-                "length_km": item.length_km,
-            } for item in items],
+                "length_km": float(item.length_km) if item.length_km is not None else None,
+            }
+            items_dict.append(item_dict)
+        return {
+            "items": items_dict,
             "total": len(items),
             "geometry_available": False,
             "error": str(e)
@@ -475,6 +495,31 @@ async def get_mpa_for_map(
     try:
         import geopandas as gpd
     except ImportError:
+        logger.warning("geopandas not available, returning metadata only")
+        # Fallback to metadata only
+        try:
+            query = db.query(MPA)
+            if iso3:
+                query = query.filter(MPA.iso3 == iso3.upper())
+            items = query.limit(limit).all()
+            return {
+                "items": [{
+                    "id": item.id,
+                    "wdpaid": item.wdpaid,
+                    "name": item.name,
+                    "orig_name": item.orig_name,
+                    "desig_eng": item.desig_eng,
+                    "iucn_cat": item.iucn_cat,
+                    "iso3": item.iso3,
+                    "gis_m_area": float(item.gis_m_area) if item.gis_m_area else None,
+                    "status": item.status,
+                } for item in items],
+                "total": len(items),
+                "geometry_available": False
+            }
+        except Exception as e:
+            logger.error(f"Error loading MPA metadata: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to load MPA data: {str(e)}")
         logger.warning("geopandas not available, returning metadata only")
         # Fallback to metadata only
         query = db.query(MPA)
@@ -709,12 +754,17 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
     r_api_health = await r_api_client.health_check()
     r_api_available = r_api_health.get("status") == "ok"
     
+    # Log the health check result for debugging
+    if not r_api_available:
+        logger.warning(f"R API health check failed: {r_api_health.get('message', 'Unknown error')}")
+    
     return {
         "total_vessels": total_vessels,
         "high_risk_vessels": high_risk_count,
         "ais_disabling_events": total_ais_events,
         "r_api_status": "connected" if r_api_available else "disconnected",
         "r_api_vessels": r_api_health.get("vessels", 0) if r_api_available else 0,
+        "r_api_message": r_api_health.get("message", "") if not r_api_available else None,
     }
 
 
@@ -727,196 +777,313 @@ async def get_predictions(
     db: Session = Depends(get_db)
 ):
     """Get predictions by combining R API anomaly scores with vessel features."""
-    # Get top scores from R API
-    top_n = limit + offset
-    r_scores = await r_api_client.get_top_scores(top_n=top_n)
-    
-    if not r_scores:
-        # Fallback to database if R API unavailable
-        query = db.query(MMSIAnomalyScore).order_by(MMSIAnomalyScore.anomaly_score.desc())
-        scores = query.offset(offset).limit(limit).all()
-        items = []
-        for score in scores:
-            # Get vessel features
-            vessel = db.query(VesselFeatures).filter(
-                VesselFeatures.mmsi == score.mmsi
-            ).first()
+    try:
+        # Get top scores from R API
+        top_n = limit + offset
+        r_scores = await r_api_client.get_top_scores(top_n=top_n)
+        
+        if not r_scores:
+            # Fallback to database if R API unavailable
+            query = db.query(MMSIAnomalyScore).order_by(MMSIAnomalyScore.anomaly_score.desc())
+            scores = query.offset(offset).limit(limit).all()
+            items = []
+            for score in scores:
+                # Get vessel features
+                vessel = db.query(VesselFeatures).filter(
+                    VesselFeatures.mmsi == score.mmsi
+                ).first()
+                
+                # Get last known position from mmsi_daily
+                last_position = None
+                last_seen_date = None
+                try:
+                    last_position = db.query(MMSIDaily).filter(
+                        MMSIDaily.mmsi == score.mmsi
+                    ).order_by(MMSIDaily.date.desc()).first()
+                    
+                    if last_position:
+                        last_seen_date = last_position.date
+                except Exception as e:
+                    logger.warning(f"Failed to get last position for MMSI {score.mmsi}: {e}")
+                
+                risk_level = "low"
+                if score.anomaly_score >= 0.9:
+                    risk_level = "critical"
+                elif score.anomaly_score >= 0.75:
+                    risk_level = "high"
+                elif score.anomaly_score >= 0.6:
+                    risk_level = "medium"
+                
+                # Extract location data
+                lat = None
+                lng = None
+                last_seen = None
+                if last_position:
+                    lat = float(last_position.cell_ll_lat) + 0.05 if last_position.cell_ll_lat is not None else None
+                    lng = float(last_position.cell_ll_lon) + 0.05 if last_position.cell_ll_lon is not None else None
+                    if last_seen_date:
+                        if hasattr(last_seen_date, 'isoformat'):
+                            last_seen = last_seen_date.isoformat()
+                        else:
+                            last_seen = str(last_seen_date)
+                
+                items.append({
+                    "id": str(score.id),
+                    "mmsi": str(score.mmsi),
+                    "anomaly_score": float(score.anomaly_score),
+                    "risk_level": risk_level,
+                    "vessel_features": VesselFeaturesResponse.from_orm(vessel).dict() if vessel else None,
+                    "lat": lat,
+                    "lng": lng,
+                    "last_seen": last_seen,
+                })
             
+            return {
+                "items": items,
+                "total": db.query(func.count(MMSIAnomalyScore.id)).scalar(),
+                "page": (offset // limit) + 1,
+                "page_size": limit,
+            }
+        
+        # Process R API scores and enrich with database data
+        items = []
+        for idx, score_data in enumerate(r_scores[offset:offset+limit]):
+            mmsi = int(float(score_data.get("mmsi", 0)))
+            anomaly_score = float(score_data.get("anomaly_score", 0.0))
+            
+            # Get vessel features from database
+            vessel = db.query(VesselFeatures).filter(
+                VesselFeatures.mmsi == mmsi
+            ).order_by(VesselFeatures.year.desc()).first()
+            
+            # Get last known position from mmsi_daily
+            last_position = None
+            last_seen_date = None
+            try:
+                last_position = db.query(MMSIDaily).filter(
+                    MMSIDaily.mmsi == mmsi
+                ).order_by(MMSIDaily.date.desc()).first()
+                
+                if last_position:
+                    last_seen_date = last_position.date
+            except Exception as e:
+                logger.warning(f"Failed to get last position for MMSI {mmsi}: {e}")
+            
+            # Determine risk level
             risk_level = "low"
-            if score.anomaly_score >= 0.9:
+            if anomaly_score >= 0.9:
                 risk_level = "critical"
-            elif score.anomaly_score >= 0.75:
+            elif anomaly_score >= 0.75:
                 risk_level = "high"
-            elif score.anomaly_score >= 0.6:
+            elif anomaly_score >= 0.6:
                 risk_level = "medium"
             
+            # Filter by risk level if specified
+            if riskLevel and riskLevel != "all" and risk_level != riskLevel:
+                continue
+            
+            # Build factors list from vessel features
+            factors = []
+            if vessel:
+                if vessel.n_disabling_events and vessel.n_disabling_events > 5:
+                    factors.append(f"Frequent AIS disabling ({vessel.n_disabling_events} events)")
+                if vessel.eez_crossings and vessel.eez_crossings > 10:
+                    factors.append(f"Multiple EEZ crossings ({vessel.eez_crossings})")
+                if vessel.mpa_crossings and vessel.mpa_crossings > 0:
+                    factors.append(f"MPA crossings detected ({vessel.mpa_crossings})")
+                if vessel.is_known_iuu:
+                    factors.append("Known IUU vessel")
+                if vessel.pct_in_eez and vessel.pct_in_eez > 0.8:
+                    factors.append("High percentage of operations in EEZ")
+            
+            # Extract location data
+            lat = None
+            lng = None
+            last_seen = None
+            if last_position:
+                lat = float(last_position.cell_ll_lat) + 0.05 if last_position.cell_ll_lat is not None else None
+                lng = float(last_position.cell_ll_lon) + 0.05 if last_position.cell_ll_lon is not None else None
+                if last_seen_date:
+                    if hasattr(last_seen_date, 'isoformat'):
+                        last_seen = last_seen_date.isoformat()
+                    else:
+                        last_seen = str(last_seen_date)
+            
+            # Use vessel year as fallback timestamp
+            timestamp = f"{vessel.year}-01-01" if vessel and vessel.year else (last_seen or "N/A")
+            
             items.append({
-                "id": str(score.id),
-                "mmsi": str(score.mmsi),
-                "anomaly_score": float(score.anomaly_score),
+                "id": f"r_{mmsi}_{idx}",
+                "mmsi": str(mmsi),
+                "vesselName": f"Vessel {mmsi}",  # Could be enhanced with actual name lookup
+                "anomaly_score": anomaly_score,
+                "riskScore": int(anomaly_score * 100),
                 "risk_level": risk_level,
+                "confidence": int(min(anomaly_score * 100 + 10, 99)),  # Approximate confidence
+                "factors": factors if factors else ["Anomalous behavior pattern detected"],
+                "predictedBehavior": f"High anomaly score ({anomaly_score:.2f}) indicates suspicious activity",
+                "timestamp": timestamp,
+                "status": "pending",
                 "vessel_features": VesselFeaturesResponse.from_orm(vessel).dict() if vessel else None,
+                "lat": lat,
+                "lng": lng,
+                "last_seen": last_seen,
             })
         
         return {
             "items": items,
-            "total": db.query(func.count(MMSIAnomalyScore.id)).scalar(),
+            "total": len(r_scores) if r_scores else 0,
             "page": (offset // limit) + 1,
             "page_size": limit,
         }
-    
-    # Process R API scores and enrich with database data
-    items = []
-    for idx, score_data in enumerate(r_scores[offset:offset+limit]):
-        mmsi = int(float(score_data.get("mmsi", 0)))
-        anomaly_score = float(score_data.get("anomaly_score", 0.0))
-        
-        # Get vessel features from database
-        vessel = db.query(VesselFeatures).filter(
-            VesselFeatures.mmsi == mmsi
-        ).order_by(VesselFeatures.year.desc()).first()
-        
-        # Determine risk level
-        risk_level = "low"
-        if anomaly_score >= 0.9:
-            risk_level = "critical"
-        elif anomaly_score >= 0.75:
-            risk_level = "high"
-        elif anomaly_score >= 0.6:
-            risk_level = "medium"
-        
-        # Filter by risk level if specified
-        if riskLevel and riskLevel != "all" and risk_level != riskLevel:
-            continue
-        
-        # Build factors list from vessel features
-        factors = []
-        if vessel:
-            if vessel.n_disabling_events and vessel.n_disabling_events > 5:
-                factors.append(f"Frequent AIS disabling ({vessel.n_disabling_events} events)")
-            if vessel.eez_crossings and vessel.eez_crossings > 10:
-                factors.append(f"Multiple EEZ crossings ({vessel.eez_crossings})")
-            if vessel.mpa_crossings and vessel.mpa_crossings > 0:
-                factors.append(f"MPA crossings detected ({vessel.mpa_crossings})")
-            if vessel.is_known_iuu:
-                factors.append("Known IUU vessel")
-            if vessel.pct_in_eez and vessel.pct_in_eez > 0.8:
-                factors.append("High percentage of operations in EEZ")
-        
-        items.append({
-            "id": f"r_{mmsi}_{idx}",
-            "mmsi": str(mmsi),
-            "vesselName": f"Vessel {mmsi}",  # Could be enhanced with actual name lookup
-            "anomaly_score": anomaly_score,
-            "riskScore": int(anomaly_score * 100),
-            "risk_level": risk_level,
-            "confidence": int(min(anomaly_score * 100 + 10, 99)),  # Approximate confidence
-            "factors": factors if factors else ["Anomalous behavior pattern detected"],
-            "predictedBehavior": f"High anomaly score ({anomaly_score:.2f}) indicates suspicious activity",
-            "timestamp": f"{vessel.year}-01-01" if vessel and vessel.year else "N/A",
-            "status": "pending",
-            "vessel_features": VesselFeaturesResponse.from_orm(vessel).dict() if vessel else None,
-        })
-    
-    return {
-        "items": items,
-        "total": len(r_scores),
-        "page": (offset // limit) + 1,
-        "page_size": limit,
-    }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting predictions: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get predictions: {str(e)}")
 
 
 @app.get("/api/vessels/{mmsi}")
 async def get_vessel_details(mmsi: int, db: Session = Depends(get_db)):
     """Get comprehensive vessel details combining database and R API data."""
-    # Get vessel features from database
-    vessel = db.query(VesselFeatures).filter(
-        VesselFeatures.mmsi == mmsi
-    ).order_by(VesselFeatures.year.desc()).first()
-    
-    if not vessel:
-        raise HTTPException(status_code=404, detail="Vessel not found")
-    
-    # Get anomaly score from R API
-    r_score = await r_api_client.get_score_by_mmsi(mmsi)
-    anomaly_score = None
-    if r_score:
-        anomaly_score = float(r_score.get("anomaly_score", 0.0))
-    else:
-        # Fallback to database
-        db_score = db.query(MMSIAnomalyScore).filter(
-            MMSIAnomalyScore.mmsi == mmsi
-        ).order_by(MMSIAnomalyScore.anomaly_score.desc()).first()
-        if db_score:
-            anomaly_score = float(db_score.anomaly_score)
-    
-    # Determine risk level
-    risk_level = "low"
-    if anomaly_score and anomaly_score >= 0.9:
-        risk_level = "critical"
-    elif anomaly_score and anomaly_score >= 0.75:
-        risk_level = "high"
-    elif anomaly_score and anomaly_score >= 0.6:
-        risk_level = "medium"
-    
-    # Get most recent date from mmsi_daily for last_seen
-    last_seen_date = db.query(func.max(MMSIDaily.date)).filter(
-        MMSIDaily.mmsi == mmsi
-    ).scalar()
-    
-    last_seen = None
-    if last_seen_date:
-        # Handle date conversion properly
-        if isinstance(last_seen_date, date):
-            last_seen = last_seen_date.isoformat()
-        elif isinstance(last_seen_date, datetime):
-            last_seen = last_seen_date.isoformat()
-        elif isinstance(last_seen_date, str):
-            last_seen = last_seen_date
-        else:
-            last_seen = str(last_seen_date)
-    
-    # Get daily positions for trajectory
-    daily_positions = db.query(MMSIDaily).filter(
-        MMSIDaily.mmsi == mmsi
-    ).order_by(MMSIDaily.date.desc()).limit(100).all()
-    
-    # Build trajectory from daily positions
-    trajectory = []
-    if daily_positions:
-        for pos in reversed(daily_positions):  # Reverse to get chronological order
-            trajectory.append({
-                "lat": pos.cell_ll_lat + 0.05,  # Convert to cell center
-                "lng": pos.cell_ll_lon + 0.05,
-                "timestamp": pos.date.isoformat() if hasattr(pos.date, 'isoformat') else str(pos.date)
-            })
-    
-    # Extract vessel metadata with fallbacks
-    vessel_features_dict = VesselFeaturesResponse.from_orm(vessel).dict()
-    
-    # Determine best values with fallbacks (prefer inferred, then registry, then gfw)
-    flag = vessel_features_dict.get("flag_ais") or vessel_features_dict.get("flag_registry") or vessel_features_dict.get("flag_gfw") or "UNK"
-    vessel_type = vessel_features_dict.get("vessel_class_inferred") or vessel_features_dict.get("vessel_class_registry") or vessel_features_dict.get("vessel_class_gfw") or "Unknown"
-    tonnage = vessel_features_dict.get("tonnage_gt_inferred") or vessel_features_dict.get("tonnage_gt_registry") or vessel_features_dict.get("tonnage_gt_gfw") or 0.0
-    avg_speed = vessel_features_dict.get("mean_speed") or 0.0
-    
-    return {
-        "mmsi": mmsi,
-        "vessel_name": f"Vessel {mmsi}",  # VesselFeatures doesn't have name, using MMSI
-        "vessel_type": vessel_type,
-        "flag": flag,
-        "tonnage": tonnage,
-        "avg_speed": avg_speed,
-        "eez_crossings": vessel_features_dict.get("eez_crossings") or 0,
-        "time_disabled_hours": vessel_features_dict.get("total_disable_hours") or 0.0,
-        "anomaly_score": anomaly_score,
-        "risk_level": risk_level,
-        "last_seen": last_seen or datetime.now().isoformat(),
-        "trajectory": trajectory,
-        "vessel_features": vessel_features_dict,  # Keep full features for detailed view
-        "daily_positions": [MMSIDailyResponse.from_orm(pos).dict() for pos in daily_positions],
-        "r_api_available": r_score is not None,
-    }
+    try:
+        # Get vessel features from database
+        vessel = db.query(VesselFeatures).filter(
+            VesselFeatures.mmsi == mmsi
+        ).order_by(VesselFeatures.year.desc()).first()
+        
+        if not vessel:
+            raise HTTPException(status_code=404, detail="Vessel not found")
+        
+        # Get anomaly score from R API (with error handling)
+        anomaly_score = None
+        r_score = None
+        try:
+            r_score = await r_api_client.get_score_by_mmsi(mmsi)
+            if r_score:
+                anomaly_score = float(r_score.get("anomaly_score", 0.0))
+        except Exception as e:
+            logger.warning(f"Failed to get R API score for MMSI {mmsi}: {e}")
+        
+        # Fallback to database if R API failed
+        if anomaly_score is None:
+            db_score = db.query(MMSIAnomalyScore).filter(
+                MMSIAnomalyScore.mmsi == mmsi
+            ).order_by(MMSIAnomalyScore.anomaly_score.desc()).first()
+            if db_score:
+                anomaly_score = float(db_score.anomaly_score)
+        
+        # Determine risk level
+        risk_level = "low"
+        if anomaly_score is not None:
+            if anomaly_score >= 0.9:
+                risk_level = "critical"
+            elif anomaly_score >= 0.75:
+                risk_level = "high"
+            elif anomaly_score >= 0.6:
+                risk_level = "medium"
+        
+        # Get most recent date from mmsi_daily for last_seen
+        last_seen_date = None
+        try:
+            last_seen_date = db.query(func.max(MMSIDaily.date)).filter(
+                MMSIDaily.mmsi == mmsi
+            ).scalar()
+        except Exception as e:
+            logger.warning(f"Failed to get last_seen_date for MMSI {mmsi}: {e}")
+        
+        last_seen = None
+        if last_seen_date:
+            # Handle date conversion properly
+            try:
+                if isinstance(last_seen_date, date):
+                    last_seen = last_seen_date.isoformat()
+                elif isinstance(last_seen_date, datetime):
+                    last_seen = last_seen_date.isoformat()
+                elif isinstance(last_seen_date, str):
+                    last_seen = last_seen_date
+                else:
+                    last_seen = str(last_seen_date)
+            except Exception as e:
+                logger.warning(f"Failed to convert last_seen_date for MMSI {mmsi}: {e}")
+        
+        # Get daily positions for trajectory
+        daily_positions = []
+        try:
+            daily_positions = db.query(MMSIDaily).filter(
+                MMSIDaily.mmsi == mmsi
+            ).order_by(MMSIDaily.date.desc()).limit(100).all()
+        except Exception as e:
+            logger.warning(f"Failed to get daily positions for MMSI {mmsi}: {e}")
+        
+        # Build trajectory from daily positions
+        trajectory = []
+        if daily_positions:
+            try:
+                for pos in reversed(daily_positions):  # Reverse to get chronological order
+                    try:
+                        timestamp = pos.date.isoformat() if hasattr(pos.date, 'isoformat') else str(pos.date)
+                        trajectory.append({
+                            "lat": float(pos.cell_ll_lat) + 0.05 if pos.cell_ll_lat is not None else 0.0,  # Convert to cell center
+                            "lng": float(pos.cell_ll_lon) + 0.05 if pos.cell_ll_lon is not None else 0.0,
+                            "timestamp": timestamp
+                        })
+                    except Exception as e:
+                        logger.warning(f"Failed to process position for MMSI {mmsi}: {e}")
+                        continue
+            except Exception as e:
+                logger.warning(f"Failed to build trajectory for MMSI {mmsi}: {e}")
+        
+        # Extract vessel metadata with fallbacks
+        try:
+            vessel_features_dict = VesselFeaturesResponse.from_orm(vessel).dict()
+        except Exception as e:
+            logger.error(f"Failed to serialize vessel features for MMSI {mmsi}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to serialize vessel data: {str(e)}")
+        
+        # Determine best values with fallbacks (prefer inferred, then registry, then gfw)
+        flag = vessel_features_dict.get("flag_ais") or vessel_features_dict.get("flag_registry") or vessel_features_dict.get("flag_gfw") or "UNK"
+        vessel_type = vessel_features_dict.get("vessel_class_inferred") or vessel_features_dict.get("vessel_class_registry") or vessel_features_dict.get("vessel_class_gfw") or "Unknown"
+        tonnage = vessel_features_dict.get("tonnage_gt_inferred") or vessel_features_dict.get("tonnage_gt_registry") or vessel_features_dict.get("tonnage_gt_gfw") or 0.0
+        avg_speed = vessel_features_dict.get("mean_speed") or 0.0
+        
+        # Serialize daily positions safely
+        daily_positions_dict = []
+        try:
+            for pos in daily_positions:
+                try:
+                    daily_positions_dict.append(MMSIDailyResponse.from_orm(pos).dict())
+                except Exception as e:
+                    logger.warning(f"Failed to serialize daily position for MMSI {mmsi}: {e}")
+                    continue
+        except Exception as e:
+            logger.warning(f"Failed to serialize daily positions for MMSI {mmsi}: {e}")
+        
+        return {
+            "mmsi": mmsi,
+            "vessel_name": f"Vessel {mmsi}",  # VesselFeatures doesn't have name, using MMSI
+            "vessel_type": vessel_type,
+            "flag": flag,
+            "tonnage": float(tonnage) if tonnage else 0.0,
+            "avg_speed": float(avg_speed) if avg_speed else 0.0,
+            "eez_crossings": int(vessel_features_dict.get("eez_crossings") or 0),
+            "time_disabled_hours": float(vessel_features_dict.get("total_disable_hours") or 0.0),
+            "anomaly_score": float(anomaly_score) if anomaly_score is not None else None,
+            "risk_level": risk_level,
+            "last_seen": last_seen or datetime.now().isoformat(),
+            "trajectory": trajectory,
+            "vessel_features": vessel_features_dict,  # Keep full features for detailed view
+            "daily_positions": daily_positions_dict,
+            "r_api_available": r_score is not None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting vessel details for MMSI {mmsi}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get vessel details: {str(e)}"
+        )
 
 
 @app.get("/api/analytics/model-performance")
@@ -1030,6 +1197,93 @@ async def get_summary_stats(db: Session = Depends(get_db)):
             "iuu_vessels": db.query(func.count(VesselFeatures.id)).filter(VesselFeatures.is_known_iuu == True).scalar(),
         }
     }
+
+
+# ==================== Cache Management Endpoints ====================
+
+@app.get("/api/cache/info")
+async def get_cache_info(cache_type: Optional[str] = None):
+    """Get information about cached R API results."""
+    from r_api_cache import get_cache_info
+    return get_cache_info(cache_type)
+
+@app.post("/api/cache/clear")
+async def clear_r_api_cache(
+    cache_type: Optional[str] = None,
+    older_than_hours: Optional[int] = None
+):
+    """Clear cached R API results."""
+    from r_api_cache import clear_cache
+    from datetime import timedelta
+    
+    older_than = timedelta(hours=older_than_hours) if older_than_hours else None
+    cleared = clear_cache(cache_type, older_than)
+    
+    return {
+        "status": "success",
+        "cleared_files": cleared,
+        "cache_type": cache_type or "all"
+    }
+
+
+# ==================== AIS Events Endpoints ====================
+
+@app.get("/api/map/ais-events")
+async def get_ais_events(
+    bounds: Optional[BoundsQuery] = None,
+    limit: int = Query(100, ge=1, le=1000),
+    db: Session = Depends(get_db)
+):
+    """Get AIS disabling events for map display."""
+    try:
+        # Get vessels with disabling events from vessel_features
+        query = db.query(VesselFeatures).filter(
+            VesselFeatures.n_disabling_events > 0
+        )
+        
+        # Apply bounds filter if provided
+        if bounds:
+            # Note: vessel_features doesn't have lat/lng, so we'd need to join with mmsi_daily
+            # For now, just return vessels with disabling events
+            pass
+        
+        vessels = query.limit(limit).all()
+        
+        # Get recent positions for these vessels from mmsi_daily
+        items = []
+        for vessel in vessels:
+            try:
+                # Get most recent position for this vessel
+                recent_pos = db.query(MMSIDaily).filter(
+                    MMSIDaily.mmsi == vessel.mmsi
+                ).order_by(MMSIDaily.date.desc()).first()
+                
+                if recent_pos:
+                    # Calculate average disabling hours per event
+                    avg_disable_hours = (vessel.total_disable_hours / vessel.n_disabling_events) if vessel.n_disabling_events > 0 else 0
+                    
+                    items.append({
+                        "id": f"ais_{vessel.mmsi}",
+                        "mmsi": str(vessel.mmsi),
+                        "lat": float(recent_pos.cell_ll_lat) + 0.05 if recent_pos.cell_ll_lat else 0.0,
+                        "lng": float(recent_pos.cell_ll_lon) + 0.05 if recent_pos.cell_ll_lon else 0.0,
+                        "duration": float(avg_disable_hours),
+                        "startTime": recent_pos.date.isoformat() if hasattr(recent_pos.date, 'isoformat') else str(recent_pos.date),
+                        "endTime": recent_pos.date.isoformat() if hasattr(recent_pos.date, 'isoformat') else str(recent_pos.date),
+                        "n_events": int(vessel.n_disabling_events) if vessel.n_disabling_events else 0,
+                        "total_hours": float(vessel.total_disable_hours) if vessel.total_disable_hours else 0.0,
+                    })
+            except Exception as e:
+                logger.warning(f"Failed to process AIS event for MMSI {vessel.mmsi}: {e}")
+                continue
+        
+        return {
+            "items": items,
+            "total": len(items)
+        }
+    except Exception as e:
+        logger.error(f"Error getting AIS events: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get AIS events: {str(e)}")
 
 
 # ==================== Hotspot Analysis Endpoints ====================

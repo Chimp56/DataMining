@@ -314,3 +314,30 @@ message("  - Individual histograms for each parameter combination")
 message("  - Suspected vessels plots for each percentile threshold")
 message("  - Comparison plots showing parameter effects")
 
+
+
+# what number of mmsi in iuu_list also in df_out (mmsi_anomaly_scores)
+length(unique(mmsi_daily$mmsi))
+length(unique(fishing_vessels_metadata$mmsi))
+length(unique(vessel_features_all$mmsi))
+length(unique(df_out$mmsi))
+length(unique(iuu_list$MMSI))
+
+# list of mmsi in iuu_list that are also in df_out
+mmsi_in_iuu_list_and_df_out <- intersect(iuu_list$MMSI, df_out$mmsi)
+length(mmsi_in_iuu_list_and_df_out)
+
+# Get anomaly scores for MMSIs in iuu_list that are also in df_out
+iuu_anomaly_scores <- df_out[df_out$mmsi %in% mmsi_in_iuu_list_and_df_out, ]
+print(paste("Number of IUU vessels with anomaly scores:", nrow(iuu_anomaly_scores)))
+print(paste("Mean anomaly score for IUU vessels:", round(mean(iuu_anomaly_scores$anomaly_score, na.rm = TRUE), 4)))
+print(paste("Median anomaly score for IUU vessels:", round(median(iuu_anomaly_scores$anomaly_score, na.rm = TRUE), 4)))
+print(paste("Max anomaly score for IUU vessels:", round(max(iuu_anomaly_scores$anomaly_score, na.rm = TRUE), 4)))
+print(paste("Min anomaly score for IUU vessels:", round(min(iuu_anomaly_scores$anomaly_score, na.rm = TRUE), 4)))
+
+# Show top IUU vessels by anomaly score
+iuu_anomaly_scores_sorted <- iuu_anomaly_scores[order(-iuu_anomaly_scores$anomaly_score), ]
+print("\nTop 20 IUU vessels by anomaly score:")
+print(head(iuu_anomaly_scores_sorted[, c("mmsi", "anomaly_score", "avg_path")], 20))
+
+

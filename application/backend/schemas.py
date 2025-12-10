@@ -78,9 +78,37 @@ class EEZBoundariesResponse(BaseModel):
     eez1: Optional[str]
     eez2: Optional[str]
     length_km: Optional[float]
+    doc_date: Optional[str] = None  # Date as string to avoid serialization issues
     
     class Config:
         from_attributes = True
+        
+    @classmethod
+    def from_orm_with_date(cls, obj):
+        """Convert ORM object to response, handling date serialization."""
+        data = {
+            "id": obj.id,
+            "line_id": obj.line_id,
+            "line_name": obj.line_name,
+            "line_type": obj.line_type,
+            "territory1": obj.territory1,
+            "sovereign1": obj.sovereign1,
+            "territory2": obj.territory2,
+            "sovereign2": obj.sovereign2,
+            "eez1": obj.eez1,
+            "eez2": obj.eez2,
+            "length_km": obj.length_km,
+            "doc_date": None,
+        }
+        # Handle doc_date if it exists
+        if hasattr(obj, 'doc_date') and obj.doc_date:
+            if isinstance(obj.doc_date, str):
+                data["doc_date"] = obj.doc_date
+            elif hasattr(obj.doc_date, 'isoformat'):
+                data["doc_date"] = obj.doc_date.isoformat()
+            else:
+                data["doc_date"] = str(obj.doc_date)
+        return cls(**data)
 
 
 class VesselFeaturesResponse(BaseModel):

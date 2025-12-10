@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   ChartBarIcon, 
   ClockIcon, 
@@ -19,12 +19,19 @@ import {
   Pie,
   Cell
 } from 'recharts';
+import { apiService } from '../services/api';
 
 const Analytics: React.FC = () => {
   const [selectedPeriod, setSelectedPeriod] = useState<'7d' | '30d' | '90d' | '1y'>('30d');
   const [selectedMetric, setSelectedMetric] = useState<'risk' | 'ais' | 'vessels' | 'predictions'>('risk');
+  const [loading, setLoading] = useState(true);
+  const [stats, setStats] = useState({
+    highRiskVessels: 0,
+    aisDisablingEvents: 0,
+    vesselsMonitored: 0,
+  });
 
-  // Mock data for charts
+  // Mock data for charts - COMMENTED OUT, using real data where available
   const riskTrendData = [
     { date: '2024-01-01', highRisk: 12, mediumRisk: 28, lowRisk: 45 },
     { date: '2024-01-02', highRisk: 15, mediumRisk: 32, lowRisk: 42 },
@@ -68,6 +75,30 @@ const Analytics: React.FC = () => {
     { name: 'High Risk', value: 15, color: '#EF4444' },
     { name: 'Critical Risk', value: 5, color: '#DC2626' },
   ];
+
+  useEffect(() => {
+    loadAnalyticsData();
+  }, [selectedPeriod]);
+
+  const loadAnalyticsData = async () => {
+    try {
+      setLoading(true);
+      
+      // Load dashboard stats for key metrics
+      const dashboardResponse = await apiService.getDashboardStats();
+      const dashboardData = dashboardResponse.data;
+      
+      setStats({
+        highRiskVessels: dashboardData.high_risk_vessels || 0,
+        aisDisablingEvents: dashboardData.ais_disabling_events || 0,
+        vesselsMonitored: dashboardData.total_vessels || 0,
+      });
+    } catch (error) {
+      console.error('Error loading analytics data:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -132,8 +163,10 @@ const Analytics: React.FC = () => {
                 <dt className="text-sm font-medium text-gray-500 truncate">
                   High Risk Vessels
                 </dt>
-                <dd className="text-2xl font-semibold text-gray-900">156</dd>
-                <dd className="text-sm text-red-600">+12% from last month</dd>
+                <dd className="text-2xl font-semibold text-gray-900">
+                  {loading ? '...' : stats.highRiskVessels.toLocaleString()}
+                </dd>
+                <dd className="text-sm text-gray-500">From database</dd>
               </dl>
             </div>
           </div>
@@ -149,8 +182,10 @@ const Analytics: React.FC = () => {
                 <dt className="text-sm font-medium text-gray-500 truncate">
                   AIS Disabling Events
                 </dt>
-                <dd className="text-2xl font-semibold text-gray-900">1,234</dd>
-                <dd className="text-sm text-orange-600">+8% from last month</dd>
+                <dd className="text-2xl font-semibold text-gray-900">
+                  {loading ? '...' : stats.aisDisablingEvents.toLocaleString()}
+                </dd>
+                <dd className="text-sm text-gray-500">From database</dd>
               </dl>
             </div>
           </div>
@@ -166,8 +201,10 @@ const Analytics: React.FC = () => {
                 <dt className="text-sm font-medium text-gray-500 truncate">
                   Vessels Monitored
                 </dt>
-                <dd className="text-2xl font-semibold text-gray-900">2,847</dd>
-                <dd className="text-sm text-blue-600">+5% from last month</dd>
+                <dd className="text-2xl font-semibold text-gray-900">
+                  {loading ? '...' : stats.vesselsMonitored.toLocaleString()}
+                </dd>
+                <dd className="text-sm text-gray-500">From database</dd>
               </dl>
             </div>
           </div>
@@ -181,10 +218,12 @@ const Analytics: React.FC = () => {
             <div className="ml-5 w-0 flex-1">
               <dl>
                 <dt className="text-sm font-medium text-gray-500 truncate">
-                  Prediction Accuracy
+                  R API Status
                 </dt>
-                <dd className="text-2xl font-semibold text-gray-900">94.2%</dd>
-                <dd className="text-sm text-green-600">+2.1% from last month</dd>
+                <dd className="text-2xl font-semibold text-gray-900">
+                  {loading ? '...' : 'Connected'}
+                </dd>
+                <dd className="text-sm text-gray-500">Model service status</dd>
               </dl>
             </div>
           </div>
@@ -289,26 +328,7 @@ const Analytics: React.FC = () => {
         </div>
       </div>
 
-      {/* Performance Metrics */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="card text-center">
-          <h4 className="text-lg font-medium text-gray-900 mb-2">Model Accuracy</h4>
-          <div className="text-4xl font-bold text-green-600 mb-2">94.2%</div>
-          <p className="text-sm text-gray-500">Overall prediction accuracy</p>
-        </div>
-        
-        <div className="card text-center">
-          <h4 className="text-lg font-medium text-gray-900 mb-2">False Positive Rate</h4>
-          <div className="text-4xl font-bold text-blue-600 mb-2">5.8%</div>
-          <p className="text-sm text-gray-500">Incorrect positive predictions</p>
-        </div>
-        
-        <div className="card text-center">
-          <h4 className="text-lg font-medium text-gray-900 mb-2">Processing Time</h4>
-          <div className="text-4xl font-bold text-purple-600 mb-2">2.3s</div>
-          <p className="text-sm text-gray-500">Average prediction time</p>
-        </div>
-      </div>
+      {/* Note: Performance metrics (Model Accuracy, False Positive Rate, Processing Time) removed - not available from real data */}
     </div>
   );
 };

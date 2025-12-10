@@ -33,7 +33,7 @@ def load_mmsi_anomaly_scores(chunk_size=10000):
     print(f"Loading {csv_path.name}...")
     print("This may take a while for large files...")
     
-    # Clear existing data (SQLite doesn't support TRUNCATE CASCADE)
+    # Clear existing data 
     with engine.connect() as conn:
         conn.execute(text("DELETE FROM mmsi_anomaly_scores"))
         conn.commit()
@@ -71,8 +71,6 @@ def load_mmsi_daily(chunk_size=50000):
         conn.commit()
     
     # Load in chunks
-    # Note: Using default method (not 'multi') for SQLite compatibility
-    # SQLite has parameter limits that 'multi' can exceed with large chunks
     total_rows = 0
     for chunk in pd.read_csv(csv_path, chunksize=chunk_size, parse_dates=['date']):
         chunk.to_sql(
@@ -87,7 +85,7 @@ def load_mmsi_daily(chunk_size=50000):
     print(f"\nLoaded {total_rows:,} rows from {csv_path.name}")
 
 
-def load_mpa():
+def load_mpa(chunk_size=5000):
     """Load MPA CSV into database."""
     csv_path = DATA_DIR / "mpa.csv"
     if not csv_path.exists():
@@ -98,21 +96,52 @@ def load_mpa():
     
     print(f"Loading {csv_path.name}...")
     
-    # Clear existing data (SQLite doesn't support TRUNCATE CASCADE)
+    # Clear existing data 
     with engine.connect() as conn:
         conn.execute(text("DELETE FROM mpa"))
         conn.commit()
     
-    # Load entire file (should be manageable size)
-    df = pd.read_csv(csv_path)
-    df.to_sql(
-        'mpa',
-        engine,
-        if_exists='append',
-        index=False
-    )
+    # Read first chunk to get column names and check for duplicates
+    first_chunk = True
+    seen_wdpaid = set()
+    total_rows = 0
+    skipped_duplicates = 0
     
-    print(f"✓ Loaded {len(df):,} rows from {csv_path.name}")
+    for chunk in pd.read_csv(csv_path, chunksize=chunk_size):
+        # Convert column names from uppercase to lowercase to match database model
+        chunk.columns = chunk.columns.str.lower()
+        
+        # Drop duplicates on wdpaid within this chunk
+        chunk_before = len(chunk)
+        chunk = chunk.drop_duplicates(subset=['wdpaid'], keep='first')
+        if len(chunk) < chunk_before:
+            skipped_duplicates += (chunk_before - len(chunk))
+        
+        # Filter out wdpaid values already seen
+        if 'wdpaid' in chunk.columns:
+            chunk = chunk[~chunk['wdpaid'].isin(seen_wdpaid)]
+            seen_wdpaid.update(chunk['wdpaid'].tolist())
+        
+        if len(chunk) == 0:
+            continue
+        
+        try:
+            chunk.to_sql(
+                'mpa',
+                engine,
+                if_exists='append',
+                index=False
+            )
+            total_rows += len(chunk)
+            print(f"Loaded {total_rows:,} rows...", end='\r')
+        except Exception as e:
+            print(f"\nError loading chunk: {e}")
+            # Try to continue with next chunk
+            continue
+    
+    print(f"\nLoaded {total_rows:,} rows from {csv_path.name}")
+    if skipped_duplicates > 0:
+        print(f"Skipped {skipped_duplicates:,} duplicate rows")
 
 
 def load_eez():
@@ -126,7 +155,7 @@ def load_eez():
     
     print(f"Loading {csv_path.name}...")
     
-    # Clear existing data (SQLite doesn't support TRUNCATE CASCADE)
+    # Clear existing data 
     with engine.connect() as conn:
         conn.execute(text("DELETE FROM eez"))
         conn.commit()
@@ -140,7 +169,7 @@ def load_eez():
         index=False
     )
     
-    print(f"✓ Loaded {len(df):,} rows from {csv_path.name}")
+    print(f"Loaded {len(df):,} rows from {csv_path.name}")
 
 
 def load_eez_boundaries():
@@ -161,7 +190,11 @@ def load_eez_boundaries():
     
     # Load entire file (should be manageable size)
     # Convert column names from uppercase to snake_case to match database model
-    df = pd.read_csv(csv_path, parse_dates=['DOC_DATE'], errors='coerce')
+    df = pd.read_csv(csv_path)
+    
+    # Parse date column with error handling
+    if 'DOC_DATE' in df.columns:
+        df['DOC_DATE'] = pd.to_datetime(df['DOC_DATE'], errors='coerce')
     
     # Map CSV column names (uppercase) to database column names (snake_case)
     column_mapping = {
@@ -208,7 +241,7 @@ def load_eez_boundaries():
         index=False
     )
     
-    print(f"✓ Loaded {len(df):,} rows from {csv_path.name}")
+    print(f"Loaded {len(df):,} rows from {csv_path.name}")
 
 
 def load_vessel_features(chunk_size=10000):
@@ -237,7 +270,6 @@ def load_vessel_features(chunk_size=10000):
             if col in chunk.columns:
                 chunk[col] = chunk[col].astype(str).str.upper() == 'TRUE'
         
-        # Note: Using default method (not 'multi') for SQLite compatibility
         chunk.to_sql(
             'vessel_features_all',
             engine,
@@ -265,7 +297,7 @@ def main():
     # Load data
     print("\n1. Loading MMSI Anomaly Scores...")
     load_mmsi_anomaly_scores()
-    
+
     print("\n2. Loading MMSI Daily Data...")
     load_mmsi_daily()
     
