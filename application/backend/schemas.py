@@ -1,5 +1,5 @@
 """Pydantic schemas for API requests and responses."""
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, List
 from datetime import date
 
@@ -79,6 +79,20 @@ class EEZBoundariesResponse(BaseModel):
     eez2: Optional[str]
     length_km: Optional[float]
     doc_date: Optional[str] = None  # Date as string to avoid serialization issues
+    
+    @field_validator('doc_date', mode='before')
+    @classmethod
+    def convert_date_to_string(cls, v):
+        """Convert date objects to strings."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return v
+        if isinstance(v, date):
+            return v.isoformat()
+        if hasattr(v, 'isoformat'):
+            return v.isoformat()
+        return str(v)
     
     class Config:
         from_attributes = True

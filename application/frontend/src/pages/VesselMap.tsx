@@ -5,6 +5,7 @@ import MapWrapper from '../components/MapWrapper';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { apiService } from '../services/api';
+import { useMapData } from '../contexts/MapDataContext';
 // Leaflet icon fix is handled globally in src/index.tsx
 
 interface Vessel {
@@ -62,12 +63,13 @@ const VesselMap: React.FC = () => {
   const [selectedRisk, setSelectedRisk] = useState<string>('all');
   const [showEEZ, setShowEEZ] = useState(true);
   const [showMPA, setShowMPA] = useState(true);
-  const [eezBoundariesData, setEezBoundariesData] = useState<EEZBoundaryItem[]>([]);
-  const [mpaData, setMpaData] = useState<MPAItem[]>([]);
   const [vessels, setVessels] = useState<Vessel[]>([]);
   const [aisEvents, setAisEvents] = useState<AISEvent[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  
+  // Use map data from context (loaded on app startup)
+  const { eezBoundaries: eezBoundariesData, mpaData, loading: mapDataLoading } = useMapData();
 
   // Mock data - COMMENTED OUT
   // const vessels: Vessel[] = [
@@ -136,34 +138,8 @@ const VesselMap: React.FC = () => {
       setLoading(true);
       setError(null);
 
-      // Always load data, regardless of checkbox state
-      // Load EEZ boundaries data
-      try {
-        const eezResponse = await apiService.getEEZBoundariesForMap({ limit: 1000 });
-        console.log('EEZ Boundaries Response:', eezResponse);
-        if (eezResponse.data && eezResponse.data.items) {
-          console.log(`Loaded ${eezResponse.data.items.length} EEZ boundary items`);
-          setEezBoundariesData(eezResponse.data.items);
-        } else {
-          console.warn('EEZ boundaries response missing items:', eezResponse);
-        }
-      } catch (eezErr) {
-        console.error('Error loading EEZ boundaries data:', eezErr);
-      }
-
-      // Load MPA data
-      try {
-        const mpaResponse = await apiService.getMPAForMap({ limit: 1000 });
-        console.log('MPA Response:', mpaResponse);
-        if (mpaResponse.data && mpaResponse.data.items) {
-          console.log(`Loaded ${mpaResponse.data.items.length} MPA items`);
-          setMpaData(mpaResponse.data.items);
-        } else {
-          console.warn('MPA response missing items:', mpaResponse);
-        }
-      } catch (mpaErr) {
-        console.error('Error loading MPA data:', mpaErr);
-      }
+      // EEZ and MPA data are loaded by MapDataContext on app startup
+      // No need to fetch them here - they're already available via useMapData()
 
       // Load vessels data from predictions
       try {
@@ -174,43 +150,61 @@ const VesselMap: React.FC = () => {
         });
         console.log('Predictions Response:', predictionsResponse);
         if (predictionsResponse.data && predictionsResponse.data.items) {
-          // Map predictions directly to vessels (locations are now included in response)
-          const vesselData: Vessel[] = predictionsResponse.data.items
-            .filter((item: any) => {
-              // Only include vessels with valid coordinates
-              return item.lat != null && item.lng != null && item.lat !== 0 && item.lng !== 0;
-            })
-            .map((item: any) => {
-              const mmsi = String(item.mmsi);
-              
-              // Determine risk level from anomaly score
-              const anomalyScore = item.anomaly_score || 0;
-              let risk: 'low' | 'medium' | 'high' | 'critical' = 'low';
-              if (anomalyScore >= 0.9) risk = 'critical';
-              else if (anomalyScore >= 0.75) risk = 'high';
-              else if (anomalyScore >= 0.6) risk = 'medium';
-              else if (anomalyScore >= 0.4) risk = 'medium';
-              
-              return {
-                id: `vessel_${mmsi}`,
-                name: item.vesselName || `Vessel ${mmsi}`,
-                mmsi: mmsi,
-                lat: item.lat,
-                lng: item.lng,
-                risk: risk,
-                type: item.vessel_features?.vessel_class_inferred || 'Unknown',
-                flag: item.vessel_features?.flag_ais || 'UNK',
-                lastSeen: item.last_seen || item.timestamp || new Date().toISOString(),
-              };
-            });
+          console.log(`Total predictions received: ${predictionsResponse.data.items.length}`);
           
-          console.log(`Loaded ${vesselData.length} vessels with valid positions`);
+          // Map predictions directly to vessels (locations are now included in response)
+          const allItems = predictionsResponse.data.items;
+          const itemsWithCoords = allItems.filter((item: any) => {
+            const hasCoords = item.lat != null && item.lng != null && 
+                             item.lat !== 0 && item.lng !== 0 &&
+                             !isNaN(parseFloat(item.lat)) && !isNaN(parseFloat(item.lng));
+            if (!hasCoords) {
+              console.debug(`Vessel ${item.mmsi} missing coordinates: lat=${item.lat}, lng=${item.lng}`);
+            }
+            return hasCoords;
+          });
+          
+          console.log(`Items with valid coordinates: ${itemsWithCoords.length} out of ${allItems.length}`);
+          
+          const vesselData: Vessel[] = itemsWithCoords.map((item: any) => {
+            const mmsi = String(item.mmsi);
+            
+            // Determine risk level from anomaly score
+            const anomalyScore = item.anomaly_score || 0;
+            let risk: 'low' | 'medium' | 'high' | 'critical' = 'low';
+            if (anomalyScore >= 0.9) risk = 'critical';
+            else if (anomalyScore >= 0.75) risk = 'high';
+            else if (anomalyScore >= 0.6) risk = 'medium';
+            else if (anomalyScore >= 0.4) risk = 'medium';
+            
+            const lat = parseFloat(item.lat);
+            const lng = parseFloat(item.lng);
+            
+            return {
+              id: `vessel_${mmsi}`,
+              name: item.vesselName || `Vessel ${mmsi}`,
+              mmsi: mmsi,
+              lat: lat,
+              lng: lng,
+              risk: risk,
+              type: item.vessel_features?.vessel_class_inferred || 'Unknown',
+              flag: item.vessel_features?.flag_ais || 'UNK',
+              lastSeen: item.last_seen || item.timestamp || new Date().toISOString(),
+            };
+          });
+          
+          console.log(`Loaded ${vesselData.length} vessels with valid positions:`, vesselData.slice(0, 3));
           setVessels(vesselData);
+          
+          if (vesselData.length === 0) {
+            console.warn('No vessels with valid coordinates found. Sample item:', allItems[0]);
+          }
         } else {
           console.warn('Predictions response missing items:', predictionsResponse);
         }
       } catch (vesselErr) {
         console.error('Error loading vessels data:', vesselErr);
+        setError('Failed to load vessels data');
       }
 
       // Load AIS events data
@@ -267,6 +261,17 @@ const VesselMap: React.FC = () => {
   const filteredVessels = selectedRisk === 'all' 
     ? vessels 
     : vessels.filter(vessel => vessel.risk === selectedRisk);
+  
+  // Debug logging
+  useEffect(() => {
+    console.log('Vessels state:', {
+      total: vessels.length,
+      filtered: filteredVessels.length,
+      selectedRisk,
+      selectedLayer,
+      sample: vessels.slice(0, 2)
+    });
+  }, [vessels, filteredVessels, selectedRisk, selectedLayer]);
 
   // Note: EEZ boundaries are line features that would need geometry data (GeoJSON/WKT) to display
   // For now, we'll show them as informational markers or wait for geometry data
@@ -324,12 +329,7 @@ const VesselMap: React.FC = () => {
                 type="checkbox"
                 id="show-eez"
                 checked={showEEZ}
-                onChange={(e) => {
-                  setShowEEZ(e.target.checked);
-                  if (e.target.checked && eezBoundariesData.length === 0) {
-                    loadMapData();
-                  }
-                }}
+                onChange={(e) => setShowEEZ(e.target.checked)}
                 className="h-4 w-4"
               />
               <label htmlFor="show-eez" className="text-sm font-medium text-foreground">
@@ -342,12 +342,7 @@ const VesselMap: React.FC = () => {
                 type="checkbox"
                 id="show-mpa"
                 checked={showMPA}
-                onChange={(e) => {
-                  setShowMPA(e.target.checked);
-                  if (e.target.checked && mpaData.length === 0) {
-                    loadMapData();
-                  }
-                }}
+                onChange={(e) => setShowMPA(e.target.checked)}
                 className="h-4 w-4"
               />
               <label htmlFor="show-mpa" className="text-sm font-medium text-foreground">
@@ -362,7 +357,7 @@ const VesselMap: React.FC = () => {
               <Button variant="secondary">Export Map</Button>
               {!loading && (
                 <span className="text-sm text-gray-600">
-                  EEZ Boundaries: {eezBoundariesData.length} | MPA: {mpaData.length}
+                  EEZ Boundaries: {eezBoundariesData.length} | MPA: {mpaData.length} | Vessels: {vessels.length}
                 </span>
               )}
             </div>
@@ -573,38 +568,60 @@ const VesselMap: React.FC = () => {
                 </LayersControl.Overlay>
               )}
               
-              {/* Vessels Layer */}
-              {selectedLayer === 'vessels' && (
-                <LayersControl.Overlay name="Vessels" checked={selectedLayer === 'vessels'}>
-                  <LayerGroup>
-                    {filteredVessels.map((vessel) => (
-                <CircleMarker
-                  key={vessel.id}
-                  center={[vessel.lat, vessel.lng]}
-                  radius={getRiskSize(vessel.risk)}
-                  color={getRiskColor(vessel.risk)}
-                  fillColor={getRiskColor(vessel.risk)}
-                  fillOpacity={0.7}
-                >
-                  <Popup>
-                    <div className="p-2">
-                      <h3 className="font-semibold text-gray-900">{vessel.name}</h3>
-                      <p className="text-sm text-gray-600">MMSI: {vessel.mmsi}</p>
-                      <p className="text-sm text-gray-600">Type: {vessel.type}</p>
-                      <p className="text-sm text-gray-600">Flag: {vessel.flag}</p>
-                      <p className="text-sm text-gray-600">Risk: <span className={`font-medium ${
-                        vessel.risk === 'critical' ? 'text-red-600' :
-                        vessel.risk === 'high' ? 'text-orange-600' :
-                        vessel.risk === 'medium' ? 'text-yellow-600' : 'text-green-600'
-                      }`}>{vessel.risk.toUpperCase()}</span></p>
-                      <p className="text-sm text-gray-600">Last Seen: {vessel.lastSeen}</p>
+              {/* Vessels Layer - Always show when vessels layer is selected */}
+              <LayersControl.Overlay name={`Vessels (${filteredVessels.length})`} checked={selectedLayer === 'vessels'}>
+                <LayerGroup>
+                  {filteredVessels.length === 0 && vessels.length > 0 ? (
+                    // Show message if vessels exist but none match the filter
+                    <div style={{ display: 'none' }}>
+                      {console.warn(`No vessels match risk filter "${selectedRisk}". Total vessels: ${vessels.length}`)}
                     </div>
-                  </Popup>
-                </CircleMarker>
-                    ))}
-                  </LayerGroup>
-                </LayersControl.Overlay>
-              )}
+                  ) : filteredVessels.length === 0 ? (
+                    // Show message if no vessels loaded at all
+                    <div style={{ display: 'none' }}>
+                      {console.warn('No vessels loaded. Check predictions API response.')}
+                    </div>
+                  ) : (
+                    filteredVessels
+                      .filter((vessel) => {
+                        // Filter out vessels with invalid coordinates
+                        const isValid = vessel.lat != null && vessel.lng != null && 
+                                       !isNaN(vessel.lat) && !isNaN(vessel.lng) &&
+                                       vessel.lat !== 0 && vessel.lng !== 0;
+                        if (!isValid) {
+                          console.debug(`Skipping vessel ${vessel.mmsi} - invalid coordinates:`, { lat: vessel.lat, lng: vessel.lng });
+                        }
+                        return isValid;
+                      })
+                      .map((vessel) => (
+                        <CircleMarker
+                          key={vessel.id}
+                          center={[vessel.lat, vessel.lng]}
+                          radius={getRiskSize(vessel.risk)}
+                          color={getRiskColor(vessel.risk)}
+                          fillColor={getRiskColor(vessel.risk)}
+                          fillOpacity={0.7}
+                        >
+                          <Popup>
+                            <div className="p-2">
+                              <h3 className="font-semibold text-gray-900">{vessel.name}</h3>
+                              <p className="text-sm text-gray-600">MMSI: {vessel.mmsi}</p>
+                              <p className="text-sm text-gray-600">Type: {vessel.type}</p>
+                              <p className="text-sm text-gray-600">Flag: {vessel.flag}</p>
+                              <p className="text-sm text-gray-600">Risk: <span className={`font-medium ${
+                                vessel.risk === 'critical' ? 'text-red-600' :
+                                vessel.risk === 'high' ? 'text-orange-600' :
+                                vessel.risk === 'medium' ? 'text-yellow-600' : 'text-green-600'
+                              }`}>{vessel.risk.toUpperCase()}</span></p>
+                              <p className="text-sm text-gray-600">Last Seen: {vessel.lastSeen}</p>
+                              <p className="text-xs text-gray-500">Position: {vessel.lat.toFixed(4)}, {vessel.lng.toFixed(4)}</p>
+                            </div>
+                          </Popup>
+                        </CircleMarker>
+                      ))
+                  )}
+                </LayerGroup>
+              </LayersControl.Overlay>
 
               {/* AIS Events Layer */}
               {selectedLayer === 'ais-events' && (

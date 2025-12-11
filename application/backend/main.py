@@ -9,6 +9,8 @@ import logging
 import json
 from pathlib import Path
 import pandas as pd
+from functools import lru_cache
+import hashlib
 
 from config import settings
 from database import get_db
@@ -26,6 +28,10 @@ from schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# In-memory cache for EEZ boundaries GeoDataFrame
+_eez_gdf_cache = None
+_eez_gdf_cache_path = None
 
 app = FastAPI(
     title="DataMining API",
@@ -378,9 +384,30 @@ async def get_eez_boundaries_for_map(
         }
     
     try:
-        # Load shapefile
-        gdf = gpd.read_file(str(shapefile_path))
-        gdf = gdf.to_crs(4326)  # Ensure WGS84
+        # Load shapefile with caching
+        global _eez_gdf_cache, _eez_gdf_cache_path
+        shapefile_path_str = str(shapefile_path)
+        
+        # Check if we have a cached version and the file hasn't changed
+        if _eez_gdf_cache is None or _eez_gdf_cache_path != shapefile_path_str:
+            logger.info("Loading EEZ boundaries shapefile (this may take a moment)...")
+            gdf = gpd.read_file(shapefile_path_str)
+            gdf = gdf.to_crs(4326)  # Ensure WGS84
+            # Simplify geometries for faster rendering (reduce complexity by ~50%)
+            # This significantly speeds up GeoJSON conversion and rendering
+            try:
+                gdf['geometry'] = gdf['geometry'].simplify(tolerance=0.001, preserve_topology=True)
+                logger.info("Simplified EEZ boundaries geometries for faster rendering")
+            except Exception as simplify_err:
+                logger.warning(f"Could not simplify geometries: {simplify_err}, using original")
+            
+            # Cache the GeoDataFrame
+            _eez_gdf_cache = gdf
+            _eez_gdf_cache_path = shapefile_path_str
+            logger.info(f"Cached EEZ boundaries GeoDataFrame ({len(gdf)} features)")
+        else:
+            gdf = _eez_gdf_cache
+            logger.debug("Using cached EEZ boundaries GeoDataFrame")
         
         # Get metadata from database to filter
         query = db.query(EEZBoundaries)
@@ -398,7 +425,14 @@ async def get_eez_boundaries_for_map(
         if line_ids:
             gdf_filtered = gdf[gdf['LINE_ID'].isin(line_ids)]
         else:
-            gdf_filtered = gdf.head(limit)
+            # If no filters, limit to most important boundaries (treaties and median lines)
+            # This reduces initial load time
+            important_types = ['Treaty', 'Median line', 'Unsettled median line']
+            gdf_important = gdf[gdf['LINE_TYPE'].isin(important_types)] if 'LINE_TYPE' in gdf.columns else gdf
+            if len(gdf_important) > 0:
+                gdf_filtered = gdf_important.head(limit)
+            else:
+                gdf_filtered = gdf.head(limit)
         
         # Convert to GeoJSON - use to_json() on the entire filtered dataframe for efficiency
         items = []
@@ -407,14 +441,31 @@ async def get_eez_boundaries_for_map(
             # Remove any date/timestamp columns that might cause serialization issues
             gdf_for_json = gdf_filtered.copy()
             for col in gdf_for_json.columns:
-                if col != 'geometry' and gdf_for_json[col].dtype.name in ['datetime64[ns]', 'object']:
-                    # Check if column contains datetime objects
+                if col != 'geometry':
                     try:
-                        # Try to convert to string if it's a datetime column
+                        # Check if column is datetime type
                         if pd.api.types.is_datetime64_any_dtype(gdf_for_json[col]):
+                            # Convert datetime columns to string
                             gdf_for_json[col] = gdf_for_json[col].astype(str)
-                    except:
-                        pass
+                        elif gdf_for_json[col].dtype.name == 'object':
+                            # Check if object column contains Timestamp objects
+                            sample = gdf_for_json[col].dropna()
+                            if len(sample) > 0:
+                                first_val = sample.iloc[0]
+                                # Check if it's a pandas Timestamp or datetime-like object
+                                if isinstance(first_val, pd.Timestamp) or hasattr(first_val, 'isoformat'):
+                                    gdf_for_json[col] = gdf_for_json[col].apply(
+                                        lambda x: x.isoformat() if pd.notna(x) and hasattr(x, 'isoformat') else x
+                                    )
+                    except Exception as e:
+                        logger.warning(f"Failed to convert column {col} to string: {e}")
+                        # If conversion fails, try to drop the column or convert to string anyway
+                        try:
+                            gdf_for_json[col] = gdf_for_json[col].astype(str)
+                        except:
+                            # If all else fails, drop the problematic column
+                            logger.warning(f"Dropping column {col} due to serialization issues")
+                            gdf_for_json = gdf_for_json.drop(columns=[col])
             
             geojson_str = gdf_for_json.to_json()
             geojson_data = json.loads(geojson_str)
@@ -784,7 +835,21 @@ async def get_predictions(
         
         if not r_scores:
             # Fallback to database if R API unavailable
-            query = db.query(MMSIAnomalyScore).order_by(MMSIAnomalyScore.anomaly_score.desc())
+            # Deduplicate by MMSI at the ORM level - get max anomaly_score per MMSI
+            subquery = db.query(
+                MMSIAnomalyScore.mmsi,
+                func.max(MMSIAnomalyScore.anomaly_score).label('max_score')
+            ).group_by(MMSIAnomalyScore.mmsi).subquery()
+            
+            # Join back to get full records with highest scores
+            query = db.query(MMSIAnomalyScore).join(
+                subquery,
+                and_(
+                    MMSIAnomalyScore.mmsi == subquery.c.mmsi,
+                    MMSIAnomalyScore.anomaly_score == subquery.c.max_score
+                )
+            ).order_by(MMSIAnomalyScore.anomaly_score.desc())
+            
             scores = query.offset(offset).limit(limit).all()
             items = []
             for score in scores:
@@ -838,25 +903,79 @@ async def get_predictions(
                     "last_seen": last_seen,
                 })
             
+            # Get total count of unique MMSIs
+            total_unique = db.query(func.count(func.distinct(MMSIAnomalyScore.mmsi))).scalar()
+            
             return {
                 "items": items,
-                "total": db.query(func.count(MMSIAnomalyScore.id)).scalar(),
+                "total": total_unique,
                 "page": (offset // limit) + 1,
                 "page_size": limit,
             }
         
         # Process R API scores and enrich with database data
+        # Use ORM-level deduplication: query database for unique MMSIs with max scores
+        subquery = db.query(
+            MMSIAnomalyScore.mmsi,
+            func.max(MMSIAnomalyScore.anomaly_score).label('max_score')
+        ).group_by(MMSIAnomalyScore.mmsi).subquery()
+        
+        # Get unique MMSIs with their max scores from database (ORM-level deduplication)
+        db_unique_query = db.query(
+            subquery.c.mmsi,
+            subquery.c.max_score.label('anomaly_score')
+        ).order_by(subquery.c.max_score.desc())
+        
+        # If we have R API scores, create a map to override database scores
+        r_api_scores_map = {}
+        if r_scores:
+            for score_data in r_scores:
+                mmsi = int(float(score_data.get("mmsi", 0)))
+                anomaly_score = float(score_data.get("anomaly_score", 0.0))
+                if mmsi > 0:  # Valid MMSI
+                    # Keep highest R API score per MMSI
+                    if mmsi not in r_api_scores_map or anomaly_score > r_api_scores_map[mmsi]:
+                        r_api_scores_map[mmsi] = anomaly_score
+        
+        # Get all unique MMSIs from database, then apply R API scores if available
+        db_scores_all = db_unique_query.all()
+        
+        # Merge: use R API scores if available, otherwise use database scores
+        final_scores = []
+        for row in db_scores_all:
+            mmsi = row.mmsi
+            # Prefer R API score if available, otherwise use database score
+            anomaly_score = r_api_scores_map.get(mmsi, float(row.anomaly_score))
+            final_scores.append({
+                "mmsi": mmsi,
+                "anomaly_score": anomaly_score
+            })
+        
+        # Add any R API MMSIs not in database
+        for mmsi, r_score in r_api_scores_map.items():
+            if not any(score["mmsi"] == mmsi for score in final_scores):
+                final_scores.append({
+                    "mmsi": mmsi,
+                    "anomaly_score": r_score
+                })
+        
+        # Sort by anomaly score descending
+        final_scores.sort(key=lambda x: x["anomaly_score"], reverse=True)
+        
+        # Apply pagination
+        paginated_scores = final_scores[offset:offset+limit]
+        
         items = []
-        for idx, score_data in enumerate(r_scores[offset:offset+limit]):
-            mmsi = int(float(score_data.get("mmsi", 0)))
-            anomaly_score = float(score_data.get("anomaly_score", 0.0))
+        for score_info in paginated_scores:
+            mmsi = score_info["mmsi"]
+            anomaly_score = score_info["anomaly_score"]
             
-            # Get vessel features from database
+            # Get vessel features from database (most recent year)
             vessel = db.query(VesselFeatures).filter(
                 VesselFeatures.mmsi == mmsi
             ).order_by(VesselFeatures.year.desc()).first()
             
-            # Get last known position from mmsi_daily
+            # Get last known position from mmsi_daily (most recent date)
             last_position = None
             last_seen_date = None
             try:
@@ -909,11 +1028,16 @@ async def get_predictions(
                     else:
                         last_seen = str(last_seen_date)
             
-            # Use vessel year as fallback timestamp
-            timestamp = f"{vessel.year}-01-01" if vessel and vessel.year else (last_seen or "N/A")
+            # Use real last_seen timestamp, fallback to vessel year if no position data
+            if last_seen:
+                timestamp = last_seen
+            elif vessel and vessel.year:
+                timestamp = f"{vessel.year}-01-01"
+            else:
+                timestamp = "N/A"
             
             items.append({
-                "id": f"r_{mmsi}_{idx}",
+                "id": f"r_{mmsi}",
                 "mmsi": str(mmsi),
                 "vesselName": f"Vessel {mmsi}",  # Could be enhanced with actual name lookup
                 "anomaly_score": anomaly_score,
@@ -930,9 +1054,12 @@ async def get_predictions(
                 "last_seen": last_seen,
             })
         
+        # Get total count of unique MMSIs from database
+        total_unique = db.query(func.count(func.distinct(MMSIAnomalyScore.mmsi))).scalar()
+        
         return {
             "items": items,
-            "total": len(r_scores) if r_scores else 0,
+            "total": total_unique,
             "page": (offset // limit) + 1,
             "page_size": limit,
         }

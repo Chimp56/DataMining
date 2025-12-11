@@ -6,8 +6,10 @@ import {
   Polygon,
   Tooltip,
 } from 'react-leaflet';
+import { GeoJSON } from 'react-leaflet';
 import MapWrapper from '../components/MapWrapper';
 import { apiService } from '../services/api';
+import { useMapData } from '../contexts/MapDataContext';
 // Leaflet icon fix is handled globally in src/index.tsx
 
 type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
@@ -29,40 +31,33 @@ interface Vessel {
   predictedPoint: { lat: number; lng: number; eta: string };
 }
 
-interface OverlayLayer {
-  id: 'eez' | 'mpa';
-  name: string;
-  description: string;
-  color: string;
-  polygon: Array<[number, number]>;
+interface EEZBoundaryItem {
+  id?: number;
+  line_id: number | null;
+  line_name: string | null;
+  line_type: string | null;
+  territory1: string | null;
+  sovereign1: string | null;
+  territory2: string | null;
+  sovereign2: string | null;
+  eez1: string | null;
+  eez2: string | null;
+  length_km: number | null;
+  geometry?: any; // GeoJSON geometry
 }
 
-const overlays: OverlayLayer[] = [
-  {
-    id: 'eez',
-    name: 'EEZ (200nm)',
-    description: 'Exclusive Economic Zones with jurisdiction boundaries.',
-    color: '#2563EB',
-    polygon: [
-      [8, -76],
-      [8, -62],
-      [-8, -62],
-      [-8, -76],
-    ],
-  },
-  {
-    id: 'mpa',
-    name: 'Marine Protected Areas',
-    description: 'Restricted fishing zones and conservation areas.',
-    color: '#16A34A',
-    polygon: [
-      [2, -68],
-      [2, -64],
-      [-2, -64],
-      [-2, -68],
-    ],
-  },
-];
+interface MPAItem {
+  id?: number;
+  wdpaid: number | null;
+  name: string | null;
+  orig_name: string | null;
+  desig_eng: string | null;
+  iucn_cat: string | null;
+  iso3: string | null;
+  gis_m_area: number | null;
+  status: string | null;
+  geometry?: any; // GeoJSON geometry
+}
 
 // Helper function to determine risk level from anomaly score
 const getRiskFromScore = (score: number): RiskLevel => {
@@ -117,6 +112,9 @@ const MainPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [hotspotCenters, setHotspotCenters] = useState<Array<{ lat: number; lng: number; intensity: number }>>([]);
+  
+  // Use map data from context (loaded on app startup)
+  const { eezBoundaries: eezBoundariesData, mpaData, loading: mapDataLoading } = useMapData();
 
   // Load vessels and hotspots on mount
   useEffect(() => {
@@ -270,6 +268,7 @@ const MainPage: React.FC = () => {
 
   const toggleLayer = (id: 'eez' | 'mpa') => {
     setActiveLayers((prev) => ({ ...prev, [id]: !prev[id] }));
+    // Data is already loaded by MapDataContext on app startup
   };
 
   return (
@@ -292,26 +291,51 @@ const MainPage: React.FC = () => {
               </div>
             </div>
             <div className="space-y-3">
-              {overlays.map((layer) => (
-                <label key={layer.id} className="flex items-start gap-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    className="mt-1 h-4 w-4 text-primary-600 rounded border-gray-300"
-                    checked={activeLayers[layer.id]}
-                    onChange={() => toggleLayer(layer.id)}
-                  />
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-gray-900">{layer.name}</span>
-                      <span
-                        className="inline-block h-2 w-8 rounded-full"
-                        style={{ backgroundColor: layer.color }}
-                      />
-                    </div>
-                    <p className="text-sm text-gray-600">{layer.description}</p>
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-1 h-4 w-4 text-primary-600 rounded border-gray-300"
+                  checked={activeLayers.eez}
+                  onChange={() => toggleLayer('eez')}
+                />
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-gray-900">EEZ (200nm)</span>
+                    <span
+                      className="inline-block h-2 w-8 rounded-full"
+                      style={{ backgroundColor: '#2563EB' }}
+                    />
                   </div>
-                </label>
-              ))}
+                  <p className="text-sm text-gray-600">Exclusive Economic Zones with jurisdiction boundaries.</p>
+                  {mapDataLoading && (
+                    <p className="text-xs text-blue-500 mt-1">Loading boundaries...</p>
+                  )}
+                  {!mapDataLoading && eezBoundariesData.length > 0 && (
+                    <p className="text-xs text-gray-500 mt-1">{eezBoundariesData.length} boundaries loaded</p>
+                  )}
+                </div>
+              </label>
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-1 h-4 w-4 text-primary-600 rounded border-gray-300"
+                  checked={activeLayers.mpa}
+                  onChange={() => toggleLayer('mpa')}
+                />
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-gray-900">Marine Protected Areas</span>
+                    <span
+                      className="inline-block h-2 w-8 rounded-full"
+                      style={{ backgroundColor: '#16A34A' }}
+                    />
+                  </div>
+                  <p className="text-sm text-gray-600">Restricted fishing zones and conservation areas.</p>
+                  {mpaData.length > 0 && (
+                    <p className="text-xs text-gray-500 mt-1">{mpaData.length} MPAs loaded</p>
+                  )}
+                </div>
+              </label>
               <label className="flex items-center gap-3 pt-1 border-t border-gray-200">
                 <input
                   type="checkbox"
@@ -419,16 +443,73 @@ const MainPage: React.FC = () => {
                 attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
               />
 
-              {overlays.map(
-                (layer) =>
-                  activeLayers[layer.id] && (
-                    <Polygon
-                      key={layer.id}
-                      positions={layer.polygon}
-                      pathOptions={{ color: layer.color, fillColor: layer.color, fillOpacity: 0.08 }}
+              {/* EEZ Boundaries Layer */}
+              {activeLayers.eez && eezBoundariesData.length > 0 && eezBoundariesData.map((boundary, idx) => {
+                if (boundary.geometry) {
+                  const geoJsonFeature = {
+                    type: "Feature" as const,
+                    properties: {
+                      line_id: boundary.line_id,
+                      line_name: boundary.line_name,
+                      line_type: boundary.line_type,
+                      territory1: boundary.territory1,
+                      sovereign1: boundary.sovereign1,
+                      territory2: boundary.territory2,
+                      sovereign2: boundary.sovereign2,
+                      length_km: boundary.length_km,
+                    },
+                    geometry: boundary.geometry
+                  };
+                  
+                  return (
+                    <GeoJSON
+                      key={`eez-boundary-${boundary.line_id || idx}`}
+                      data={geoJsonFeature}
+                      style={{
+                        color: "#2563EB",
+                        weight: 2,
+                        opacity: 0.7
+                      }}
                     />
-                  )
-              )}
+                  );
+                }
+                return null;
+              })}
+
+              {/* MPA Layer */}
+              {activeLayers.mpa && mpaData.length > 0 && mpaData.map((mpa, idx) => {
+                if (mpa.geometry) {
+                  const geoJsonFeature = {
+                    type: "Feature" as const,
+                    properties: {
+                      wdpaid: mpa.wdpaid,
+                      name: mpa.name,
+                      orig_name: mpa.orig_name,
+                      desig_eng: mpa.desig_eng,
+                      iucn_cat: mpa.iucn_cat,
+                      iso3: mpa.iso3,
+                      gis_m_area: mpa.gis_m_area,
+                      status: mpa.status,
+                    },
+                    geometry: mpa.geometry
+                  };
+                  
+                  return (
+                    <GeoJSON
+                      key={`mpa-${mpa.wdpaid || idx}`}
+                      data={geoJsonFeature}
+                      style={{
+                        color: "#16A34A",
+                        weight: 2,
+                        fillColor: "#16A34A",
+                        fillOpacity: 0.1,
+                        opacity: 0.7
+                      }}
+                    />
+                  );
+                }
+                return null;
+              })}
 
               {showAggregated &&
                 hotspotCenters.map((hotspot, idx) => (
