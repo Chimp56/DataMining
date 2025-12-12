@@ -154,12 +154,26 @@ const VesselMap: React.FC = () => {
           
           // Map predictions directly to vessels (locations are now included in response)
           const allItems = predictionsResponse.data.items;
+          console.log(`Total items received: ${allItems.length}`);
+          console.log('Sample item structure:', allItems[0] ? {
+            mmsi: allItems[0].mmsi,
+            hasLat: allItems[0].lat != null,
+            hasLng: allItems[0].lng != null,
+            lat: allItems[0].lat,
+            lng: allItems[0].lng,
+            hasVesselFeatures: !!allItems[0].vessel_features
+          } : 'No items');
+          
           const itemsWithCoords = allItems.filter((item: any) => {
-            const hasCoords = item.lat != null && item.lng != null && 
-                             item.lat !== 0 && item.lng !== 0 &&
-                             !isNaN(parseFloat(item.lat)) && !isNaN(parseFloat(item.lng));
+            const lat = item.lat;
+            const lng = item.lng;
+            const hasCoords = lat != null && lng != null && 
+                             lat !== 0 && lng !== 0 &&
+                             !isNaN(parseFloat(lat)) && !isNaN(parseFloat(lng)) &&
+                             parseFloat(lat) >= -90 && parseFloat(lat) <= 90 &&
+                             parseFloat(lng) >= -180 && parseFloat(lng) <= 180;
             if (!hasCoords) {
-              console.debug(`Vessel ${item.mmsi} missing coordinates: lat=${item.lat}, lng=${item.lng}`);
+              console.debug(`Vessel ${item.mmsi} missing/invalid coordinates: lat=${lat}, lng=${lng}`);
             }
             return hasCoords;
           });
@@ -180,6 +194,11 @@ const VesselMap: React.FC = () => {
             const lat = parseFloat(item.lat);
             const lng = parseFloat(item.lng);
             
+            // Extract vessel features (support both flat and nested)
+            const vesselFeatures = item.vessel_features || {};
+            const vesselType = item.vessel_type || vesselFeatures.vessel_class_inferred || vesselFeatures.vessel_class_registry || vesselFeatures.vessel_class_gfw || 'Unknown';
+            const flag = item.flag || vesselFeatures.flag_ais || vesselFeatures.flag_registry || vesselFeatures.flag_gfw || 'UNK';
+            
             return {
               id: `vessel_${mmsi}`,
               name: item.vesselName || `Vessel ${mmsi}`,
@@ -187,8 +206,8 @@ const VesselMap: React.FC = () => {
               lat: lat,
               lng: lng,
               risk: risk,
-              type: item.vessel_features?.vessel_class_inferred || 'Unknown',
-              flag: item.vessel_features?.flag_ais || 'UNK',
+              type: vesselType,
+              flag: flag,
               lastSeen: item.last_seen || item.timestamp || new Date().toISOString(),
             };
           });
@@ -197,7 +216,13 @@ const VesselMap: React.FC = () => {
           setVessels(vesselData);
           
           if (vesselData.length === 0) {
-            console.warn('No vessels with valid coordinates found. Sample item:', allItems[0]);
+            console.warn('No vessels with valid coordinates found.');
+            console.warn('Sample items:', allItems.slice(0, 3).map((item: any) => ({
+              mmsi: item.mmsi,
+              lat: item.lat,
+              lng: item.lng,
+              hasLastPosition: !!item.last_seen
+            })));
           }
         } else {
           console.warn('Predictions response missing items:', predictionsResponse);
@@ -271,7 +296,17 @@ const VesselMap: React.FC = () => {
       selectedLayer,
       sample: vessels.slice(0, 2)
     });
+    
+    if (filteredVessels.length === 0 && vessels.length > 0) {
+      console.warn(`No vessels match risk filter "${selectedRisk}". Total vessels: ${vessels.length}`);
+    } else if (filteredVessels.length === 0) {
+      console.warn('No vessels loaded. Check predictions API response.');
+    }
   }, [vessels, filteredVessels, selectedRisk, selectedLayer]);
+
+  useEffect(() => {
+    console.log('MPA Layer State:', { showMPA, mpaDataLength: mpaData.length, hasData: mpaData.length > 0, eezDataLength: eezBoundariesData.length });
+  }, [showMPA, mpaData.length, eezBoundariesData.length]);
 
   // Note: EEZ boundaries are line features that would need geometry data (GeoJSON/WKT) to display
   // For now, we'll show them as informational markers or wait for geometry data
@@ -342,11 +377,15 @@ const VesselMap: React.FC = () => {
                 type="checkbox"
                 id="show-mpa"
                 checked={showMPA}
-                onChange={(e) => setShowMPA(e.target.checked)}
+                onChange={(e) => {
+                  const newValue = e.target.checked;
+                  console.log('MPA checkbox clicked:', { newValue, currentMPAData: mpaData.length, currentEEZData: eezBoundariesData.length });
+                  setShowMPA(newValue);
+                }}
                 className="h-4 w-4"
               />
               <label htmlFor="show-mpa" className="text-sm font-medium text-foreground">
-                Show MPA
+                Show MPA ({mpaData.length} loaded)
               </label>
             </div>
 
@@ -381,11 +420,6 @@ const VesselMap: React.FC = () => {
               <strong>Debug:</strong> EEZ Boundaries: {eezBoundariesData.length} loaded | 
               MPA: {mpaData.length} loaded
             </p>
-            {eezBoundariesData.length > 0 && (
-              <p className="text-sm text-blue-600 mt-2">
-                 EEZ boundaries loaded. Note: Boundary lines require geometry data to display on map.
-              </p>
-            )}
           </CardContent>
         </Card>
       )}
@@ -484,10 +518,12 @@ const VesselMap: React.FC = () => {
               )}
 
               {/* MPA Layer */}
-              {showMPA && mpaData.length > 0 && (
-                <LayersControl.Overlay name={`Marine Protected Areas (${mpaData.length})`} checked={showMPA}>
-                  <LayerGroup>
-                    {mpaData.map((mpa, idx) => {
+              {showMPA && (
+                <>
+                  {mpaData.length > 0 ? (
+                    <LayersControl.Overlay name={`Marine Protected Areas (${mpaData.length})`} checked={showMPA}>
+                      <LayerGroup>
+                        {mpaData.map((mpa, idx) => {
                       // Check if geometry is available (GeoJSON format)
                       if (mpa.geometry) {
                         // Create GeoJSON feature for this MPA
@@ -549,23 +585,39 @@ const VesselMap: React.FC = () => {
                       return null;
                     })}
                     {/* Show info if no geometry available */}
-                    {mpaData.every(m => !m.geometry) && (
-                      <Marker position={[20, 0]}>
-                        <Popup>
-                          <div className="p-2">
-                            <h3 className="font-semibold text-gray-900">MPA Data Loaded</h3>
-                            <p className="text-sm text-gray-600">
-                              {mpaData.length} Marine Protected Areas loaded
-                            </p>
-                            <p className="text-sm text-gray-500 mt-2">
-                              Note: Geometry data not available. Install geopandas in backend to load geometry from shapefile.
-                            </p>
-                          </div>
-                        </Popup>
-                      </Marker>
-                    )}
-                  </LayerGroup>
-                </LayersControl.Overlay>
+                        {mpaData.every(m => !m.geometry) && (
+                          <Marker position={[20, 0]}>
+                            <Popup>
+                              <div className="p-2">
+                                <h3 className="font-semibold text-gray-900">MPA Data Loaded</h3>
+                                <p className="text-sm text-gray-600">
+                                  {mpaData.length} Marine Protected Areas loaded
+                                </p>
+                                <p className="text-sm text-gray-500 mt-2">
+                                  Note: Geometry data not available. Install geopandas in backend to load geometry from shapefile.
+                                </p>
+                              </div>
+                            </Popup>
+                          </Marker>
+                        )}
+                      </LayerGroup>
+                    </LayersControl.Overlay>
+                  ) : (
+                    <Marker position={[0, 0]}>
+                      <Popup>
+                        <div className="p-2">
+                          <h3 className="font-semibold text-gray-900">MPA Layer</h3>
+                          <p className="text-sm text-gray-600">
+                            No MPA data loaded yet. Check console for loading status.
+                          </p>
+                          <p className="text-xs text-gray-500 mt-1">
+                            MPA checkbox is {showMPA ? 'checked' : 'unchecked'}
+                          </p>
+                        </div>
+                      </Popup>
+                    </Marker>
+                  )}
+                </>
               )}
               
               {/* Vessels Layer - Always show when vessels layer is selected */}
@@ -573,14 +625,10 @@ const VesselMap: React.FC = () => {
                 <LayerGroup>
                   {filteredVessels.length === 0 && vessels.length > 0 ? (
                     // Show message if vessels exist but none match the filter
-                    <div style={{ display: 'none' }}>
-                      {console.warn(`No vessels match risk filter "${selectedRisk}". Total vessels: ${vessels.length}`)}
-                    </div>
+                    null
                   ) : filteredVessels.length === 0 ? (
                     // Show message if no vessels loaded at all
-                    <div style={{ display: 'none' }}>
-                      {console.warn('No vessels loaded. Check predictions API response.')}
-                    </div>
+                    null
                   ) : (
                     filteredVessels
                       .filter((vessel) => {

@@ -5,12 +5,16 @@ import {
   Polyline,
   Polygon,
   Tooltip,
+  Popup,
 } from 'react-leaflet';
 import { GeoJSON } from 'react-leaflet';
 import MapWrapper from '../components/MapWrapper';
 import { apiService } from '../services/api';
 import { useMapData } from '../contexts/MapDataContext';
+import hotspotDataRaw from '../utils/HOTSPOT_FINAL_DATA.json';
 // Leaflet icon fix is handled globally in src/index.tsx
+
+const hotspotData = hotspotDataRaw as HotspotData;
 
 type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
 
@@ -59,6 +63,20 @@ interface MPAItem {
   geometry?: any; // GeoJSON geometry
 }
 
+interface HotspotData {
+  metadata?: any;
+  temporal_summary?: any[];
+  fishing_cells?: Array<{ lat: number; lon: number; fishing_hours?: number }>;
+  fishing_cluster_centers?: Array<{ cluster: number; lat: number; lon: number }>;
+  fishing_cluster_summary?: any;
+  fishing_heatmap_grid?: any;
+  fishing_top2?: any;
+  ais_events?: any[];
+  ais_unique_points?: any[];
+  ais_cluster_centers?: Array<{ cluster: number; lat: number; lon: number }>;
+  ais_cluster_summary?: any;
+}
+
 // Helper function to determine risk level from anomaly score
 const getRiskFromScore = (score: number): RiskLevel => {
   if (score >= 0.8) return 'critical';
@@ -80,6 +98,52 @@ const riskColor = (risk: RiskLevel) => {
     default:
       return '#6B7280';
   }
+};
+
+// Helper function to get hotspot color based on intensity (0-1)
+// Gradient from green (low) -> yellow -> orange -> red (high)
+const getHotspotColor = (intensity: number): string => {
+  if (intensity <= 0.25) {
+    // Green to yellow-green (low intensity)
+    const ratio = intensity / 0.25;
+    const r = Math.round(34 + (220 - 34) * ratio); // 34 (green) to 220 (yellow-green)
+    const g = Math.round(197 + (220 - 197) * ratio); // 197 to 220
+    const b = Math.round(34 + (20 - 34) * ratio); // 34 to 20
+    return `rgb(${r}, ${g}, ${b})`;
+  } else if (intensity <= 0.5) {
+    // Yellow-green to yellow (medium-low)
+    const ratio = (intensity - 0.25) / 0.25;
+    const r = Math.round(220 + (255 - 220) * ratio); // 220 to 255
+    const g = Math.round(220 + (255 - 220) * ratio); // 220 to 255
+    const b = Math.round(20 - 20 * ratio); // 20 to 0
+    return `rgb(${r}, ${g}, ${b})`;
+  } else if (intensity <= 0.75) {
+    // Yellow to orange (medium-high)
+    const ratio = (intensity - 0.5) / 0.25;
+    const r = 255; // Stay at max red
+    const g = Math.round(255 - (140 - 100) * ratio); // 255 to ~215 (orange)
+    const b = 0; // Stay at 0
+    return `rgb(${r}, ${g}, ${b})`;
+  } else {
+    // Orange to red (high intensity)
+    const ratio = (intensity - 0.75) / 0.25;
+    const r = 255; // Stay at max red
+    const g = Math.round(140 - 140 * ratio); // 140 to 0
+    const b = 0; // Stay at 0
+    return `rgb(${r}, ${g}, ${b})`;
+  }
+};
+
+// Helper function to get hotspot opacity based on intensity
+const getHotspotOpacity = (intensity: number): number => {
+  // Opacity ranges from 0.3 (low) to 0.9 (high)
+  return 0.3 + (intensity * 0.6);
+};
+
+// Helper function to get hotspot radius based on intensity
+const getHotspotRadius = (intensity: number): number => {
+  // Radius ranges from 8 (low) to 25 (high)
+  return 8 + (intensity * 17);
 };
 
 const riskBadgeClass = (risk: RiskLevel) => {
@@ -122,6 +186,20 @@ const MainPage: React.FC = () => {
     loadHotspots();
   }, []);
 
+  // Debug: Log MPA data when it changes
+  useEffect(() => {
+    if (mpaData.length > 0) {
+      const withGeometry = mpaData.filter(m => m.geometry).length;
+      console.log('MPA Data Status:', {
+        total: mpaData.length,
+        withGeometry,
+        withoutGeometry: mpaData.length - withGeometry,
+        activeLayer: activeLayers.mpa,
+        sample: mpaData[0]
+      });
+    }
+  }, [mpaData, activeLayers.mpa]);
+
   const loadVessels = async () => {
     try {
       setLoading(true);
@@ -140,19 +218,28 @@ const MainPage: React.FC = () => {
           const anomalyScore = item.anomaly_score || 0;
           const risk = getRiskFromScore(anomalyScore);
           
+          // Extract vessel features from nested object or flat fields
+          const vesselFeatures = item.vessel_features || {};
+          const flag = item.flag || vesselFeatures.flag_ais || vesselFeatures.flag_registry || vesselFeatures.flag_gfw || 'UNK';
+          const vesselType = item.vessel_type || vesselFeatures.vessel_class_inferred || vesselFeatures.vessel_class_registry || vesselFeatures.vessel_class_gfw || 'Unknown';
+          const tonnage = item.tonnage || vesselFeatures.tonnage_gt_inferred || vesselFeatures.tonnage_gt_registry || vesselFeatures.tonnage_gt_gfw || 0;
+          const avgSpeed = item.avg_speed || vesselFeatures.mean_speed || 0;
+          const eezCrossings = item.eez_crossings || vesselFeatures.eez_crossings || 0;
+          const timeDisabledHours = item.time_disabled_hours || vesselFeatures.total_disable_hours || 0;
+          
           return {
             id: item.id || `vessel_${item.mmsi}`,
             name: item.vesselName || `Vessel ${item.mmsi}`,
             mmsi: String(item.mmsi),
-            flag: item.flag || 'UNK',
-            type: item.vessel_type || 'Unknown',
-            tonnage: item.tonnage || 0,
-            lastSeen: item.timestamp || new Date().toISOString(),
+            flag: flag,
+            type: vesselType,
+            tonnage: tonnage,
+            lastSeen: item.timestamp || item.last_seen || new Date().toISOString(),
             risk: risk,
             anomalyScore: anomalyScore,
-            avgSpeed: item.avg_speed || 0,
-            eezCrossings: item.eez_crossings || 0,
-            timeDisabledHours: item.time_disabled_hours || 0,
+            avgSpeed: avgSpeed,
+            eezCrossings: eezCrossings,
+            timeDisabledHours: timeDisabledHours,
             trajectory: item.trajectory || [],
             predictedPoint: item.predicted_point || { lat: 0, lng: 0, eta: '' },
           };
@@ -184,19 +271,57 @@ const MainPage: React.FC = () => {
 
   const loadHotspots = async () => {
     try {
-      const response = await apiService.getGlobalHotspots({
-        start_year: 2017,
-        end_year: 2019,
-      });
+      // Use local hotspot data from JSON file
+      const hotspots: Array<{ lat: number; lng: number; intensity: number }> = [];
       
-      if (response.data && response.data.fishing_hotspots) {
-        const hotspots = response.data.fishing_hotspots.map((hotspot: any) => ({
-          lat: hotspot.lat || 0,
-          lng: hotspot.lon || 0,
-          intensity: Math.min(1.0, (hotspot.count || 0) / 100), // Normalize intensity
-        }));
-        setHotspotCenters(hotspots.slice(0, 10)); // Limit to top 10
+      // Process fishing cluster centers
+      if (hotspotData.fishing_cluster_centers && Array.isArray(hotspotData.fishing_cluster_centers)) {
+        hotspotData.fishing_cluster_centers.forEach((cluster: any) => {
+          if (cluster.lat != null && cluster.lon != null) {
+            hotspots.push({
+              lat: cluster.lat,
+              lng: cluster.lon,
+              intensity: 0.8, // High intensity for fishing clusters
+            });
+          }
+        });
       }
+      
+      // Process AIS cluster centers (with slightly lower intensity)
+      if (hotspotData.ais_cluster_centers && Array.isArray(hotspotData.ais_cluster_centers)) {
+        hotspotData.ais_cluster_centers.forEach((cluster: any) => {
+          if (cluster.lat != null && cluster.lon != null) {
+            hotspots.push({
+              lat: cluster.lat,
+              lng: cluster.lon,
+              intensity: 0.6, // Medium intensity for AIS clusters
+            });
+          }
+        });
+      }
+      
+      // Also use fishing cells for additional hotspots (top cells by fishing hours)
+      if (hotspotData.fishing_cells && Array.isArray(hotspotData.fishing_cells)) {
+        // Sort by fishing_hours and take top cells
+        const topCells = [...hotspotData.fishing_cells]
+          .sort((a: any, b: any) => (b.fishing_hours || 0) - (a.fishing_hours || 0))
+          .slice(0, 50); // Top 50 fishing cells
+        
+        topCells.forEach((cell: any) => {
+          if (cell.lat != null && cell.lon != null && cell.fishing_hours > 0) {
+            // Normalize intensity based on fishing hours (max around 1000 hours)
+            const intensity = Math.min(1.0, (cell.fishing_hours || 0) / 1000);
+            hotspots.push({
+              lat: cell.lat,
+              lng: cell.lon,
+              intensity: intensity * 0.5, // Lower intensity for individual cells
+            });
+          }
+        });
+      }
+      
+      console.log(`Loaded ${hotspots.length} hotspots from local data`);
+      setHotspotCenters(hotspots);
     } catch (err: any) {
       console.error('Error loading hotspots:', err);
       // Don't set error state for hotspots, just log
@@ -207,6 +332,58 @@ const MainPage: React.FC = () => {
     () => [...vessels].sort((a, b) => b.anomalyScore - a.anomalyScore),
     [vessels]
   );
+
+  // Fetch full vessel details when a vessel is selected
+  const handleVesselSelect = async (vessel: Vessel) => {
+    setSelectedVessel(vessel);
+    
+    // If vessel doesn't have complete data (no trajectory, missing features), fetch full details
+    if (!vessel.trajectory || vessel.trajectory.length === 0 || vessel.tonnage === 0) {
+      try {
+        const response = await apiService.getVesselDetails(vessel.mmsi);
+        if (response.data) {
+          const item = response.data;
+          const vesselFeatures = item.vessel_features || {};
+          const flag = item.flag || vesselFeatures.flag_ais || vesselFeatures.flag_registry || vesselFeatures.flag_gfw || 'UNK';
+          const vesselType = item.vessel_type || vesselFeatures.vessel_class_inferred || vesselFeatures.vessel_class_registry || vesselFeatures.vessel_class_gfw || 'Unknown';
+          const tonnage = item.tonnage || vesselFeatures.tonnage_gt_inferred || vesselFeatures.tonnage_gt_registry || vesselFeatures.tonnage_gt_gfw || 0;
+          const avgSpeed = item.avg_speed || vesselFeatures.mean_speed || 0;
+          const eezCrossings = item.eez_crossings || vesselFeatures.eez_crossings || 0;
+          const timeDisabledHours = item.time_disabled_hours || vesselFeatures.total_disable_hours || 0;
+          
+          const updatedVessel: Vessel = {
+            ...vessel,
+            name: item.vessel_name || vessel.name,
+            flag: flag,
+            type: vesselType,
+            tonnage: tonnage,
+            avgSpeed: avgSpeed,
+            eezCrossings: eezCrossings,
+            timeDisabledHours: timeDisabledHours,
+            trajectory: item.trajectory || vessel.trajectory || [],
+            lastSeen: item.last_seen || vessel.lastSeen,
+          };
+          
+          // Update both selectedVessel and the vessel in the vessels array
+          setSelectedVessel(updatedVessel);
+          setVessels(prevVessels => 
+            prevVessels.map(v => 
+              v.mmsi === vessel.mmsi ? updatedVessel : v
+            )
+          );
+          
+          console.log('Vessel trajectory loaded:', {
+            mmsi: vessel.mmsi,
+            trajectoryLength: updatedVessel.trajectory?.length || 0,
+            hasTrajectory: (updatedVessel.trajectory?.length || 0) > 0
+          });
+        }
+      } catch (err: any) {
+        console.error('Error loading full vessel details:', err);
+        // Keep the selected vessel even if details fetch fails
+      }
+    }
+  };
 
   const handleMmsiLookup = async () => {
     const mmsi = mmsiInput.trim();
@@ -224,19 +401,28 @@ const MainPage: React.FC = () => {
         const anomalyScore = item.anomaly_score || 0;
         const risk = getRiskFromScore(anomalyScore);
         
+        // Extract vessel features from nested object or flat fields
+        const vesselFeatures = item.vessel_features || {};
+        const flag = item.flag || vesselFeatures.flag_ais || vesselFeatures.flag_registry || vesselFeatures.flag_gfw || 'UNK';
+        const vesselType = item.vessel_type || vesselFeatures.vessel_class_inferred || vesselFeatures.vessel_class_registry || vesselFeatures.vessel_class_gfw || 'Unknown';
+        const tonnage = item.tonnage || vesselFeatures.tonnage_gt_inferred || vesselFeatures.tonnage_gt_registry || vesselFeatures.tonnage_gt_gfw || 0;
+        const avgSpeed = item.avg_speed || vesselFeatures.mean_speed || 0;
+        const eezCrossings = item.eez_crossings || vesselFeatures.eez_crossings || 0;
+        const timeDisabledHours = item.time_disabled_hours || vesselFeatures.total_disable_hours || 0;
+        
         const vessel: Vessel = {
           id: `vessel_${mmsi}`,
           name: item.vessel_name || `Vessel ${mmsi}`,
           mmsi: String(mmsi),
-          flag: item.flag || 'UNK',
-          type: item.vessel_type || 'Unknown',
-          tonnage: item.tonnage || 0,
+          flag: flag,
+          type: vesselType,
+          tonnage: tonnage,
           lastSeen: item.last_seen || new Date().toISOString(),
           risk: risk,
           anomalyScore: anomalyScore,
-          avgSpeed: item.avg_speed || 0,
-          eezCrossings: item.eez_crossings || 0,
-          timeDisabledHours: item.time_disabled_hours || 0,
+          avgSpeed: avgSpeed,
+          eezCrossings: eezCrossings,
+          timeDisabledHours: timeDisabledHours,
           trajectory: item.trajectory || [],
           predictedPoint: item.predicted_point || { lat: 0, lng: 0, eta: '' },
         };
@@ -254,7 +440,7 @@ const MainPage: React.FC = () => {
           vessel_features: item.vessel_features ? 'present' : 'missing'
         });
         
-        setSelectedVessel(vessel);
+        handleVesselSelect(vessel);
         // Add to vessels list if not already there
         if (!vessels.find(v => v.mmsi === mmsi)) {
           setVessels(prev => [...prev, vessel]);
@@ -331,8 +517,21 @@ const MainPage: React.FC = () => {
                     />
                   </div>
                   <p className="text-sm text-gray-600">Restricted fishing zones and conservation areas.</p>
-                  {mpaData.length > 0 && (
-                    <p className="text-xs text-gray-500 mt-1">{mpaData.length} MPAs loaded</p>
+                  {mapDataLoading && (
+                    <p className="text-xs text-blue-500 mt-1">Loading MPAs...</p>
+                  )}
+                  {!mapDataLoading && mpaData.length > 0 && (
+                    <p className="text-xs text-gray-500 mt-1">
+                      {mpaData.length} MPAs loaded
+                      {mpaData.filter(m => m.geometry).length > 0 && (
+                        <span className="text-green-600"> ({mpaData.filter(m => m.geometry).length} with geometry)</span>
+                      )}
+                    </p>
+                  )}
+                  {!mapDataLoading && mpaData.length > 0 && mpaData.every(m => !m.geometry) && (
+                    <p className="text-xs text-yellow-600 mt-1">
+                      No geometry data available. Check backend geopandas installation.
+                    </p>
                   )}
                 </div>
               </label>
@@ -402,7 +601,7 @@ const MainPage: React.FC = () => {
                       ? 'border-primary-200 bg-primary-50'
                       : 'border-gray-200 hover:bg-gray-50'
                   }`}
-                  onClick={() => setSelectedVessel(vessel)}
+                  onClick={() => handleVesselSelect(vessel)}
                 >
                   <div>
                     <div className="flex items-center gap-2">
@@ -477,89 +676,219 @@ const MainPage: React.FC = () => {
               })}
 
               {/* MPA Layer */}
-              {activeLayers.mpa && mpaData.length > 0 && mpaData.map((mpa, idx) => {
-                if (mpa.geometry) {
-                  const geoJsonFeature = {
-                    type: "Feature" as const,
-                    properties: {
-                      wdpaid: mpa.wdpaid,
-                      name: mpa.name,
-                      orig_name: mpa.orig_name,
-                      desig_eng: mpa.desig_eng,
-                      iucn_cat: mpa.iucn_cat,
-                      iso3: mpa.iso3,
-                      gis_m_area: mpa.gis_m_area,
-                      status: mpa.status,
-                    },
-                    geometry: mpa.geometry
-                  };
-                  
-                  return (
-                    <GeoJSON
-                      key={`mpa-${mpa.wdpaid || idx}`}
-                      data={geoJsonFeature}
-                      style={{
-                        color: "#16A34A",
-                        weight: 2,
-                        fillColor: "#16A34A",
-                        fillOpacity: 0.1,
-                        opacity: 0.7
-                      }}
-                    />
-                  );
-                }
-                return null;
-              })}
+              {activeLayers.mpa && mpaData.length > 0 && (
+                <>
+                  {mpaData.map((mpa, idx) => {
+                    if (mpa.geometry) {
+                      const geoJsonFeature = {
+                        type: "Feature" as const,
+                        properties: {
+                          wdpaid: mpa.wdpaid,
+                          name: mpa.name,
+                          orig_name: mpa.orig_name,
+                          desig_eng: mpa.desig_eng,
+                          iucn_cat: mpa.iucn_cat,
+                          iso3: mpa.iso3,
+                          gis_m_area: mpa.gis_m_area,
+                          status: mpa.status,
+                        },
+                        geometry: mpa.geometry
+                      };
+                      
+                      return (
+                        <GeoJSON
+                          key={`mpa-${mpa.wdpaid || idx}`}
+                          data={geoJsonFeature}
+                          style={{
+                            color: "#16A34A",
+                            weight: 2,
+                            fillColor: "#16A34A",
+                            fillOpacity: 0.2,
+                            opacity: 0.8
+                          }}
+                        >
+                          <Popup>
+                            <div className="p-2">
+                              <h3 className="font-semibold text-gray-900">Marine Protected Area</h3>
+                              {mpa.name && (
+                                <p className="text-sm text-gray-600">{mpa.name}</p>
+                              )}
+                              {mpa.desig_eng && (
+                                <p className="text-sm text-gray-600">Designation: {mpa.desig_eng}</p>
+                              )}
+                              {mpa.iucn_cat && (
+                                <p className="text-sm text-gray-600">IUCN Category: {mpa.iucn_cat}</p>
+                              )}
+                              {mpa.iso3 && (
+                                <p className="text-sm text-gray-600">Country: {mpa.iso3}</p>
+                              )}
+                              {mpa.gis_m_area && (
+                                <p className="text-sm text-gray-600">
+                                  Area: {mpa.gis_m_area.toLocaleString()} km²
+                                </p>
+                              )}
+                              {mpa.status && (
+                                <p className="text-sm text-gray-600">Status: {mpa.status}</p>
+                              )}
+                            </div>
+                          </Popup>
+                        </GeoJSON>
+                      );
+                    }
+                    return null;
+                  })}
+                  {/* Debug: Log MPA rendering info */}
+                  {console.log('MPA Layer Render:', {
+                    active: activeLayers.mpa,
+                    totalMPAs: mpaData.length,
+                    withGeometry: mpaData.filter(m => m.geometry).length,
+                    withoutGeometry: mpaData.filter(m => !m.geometry).length
+                  })}
+                </>
+              )}
 
               {showAggregated &&
-                hotspotCenters.map((hotspot, idx) => (
-                  <CircleMarker
-                    key={idx}
-                    center={[hotspot.lat, hotspot.lng]}
-                    radius={12 + hotspot.intensity * 10}
-                    color="rgba(239,68,68,0.8)"
-                    fillColor="rgba(239,68,68,0.6)"
-                    fillOpacity={0.6}
-                  >
-                    <Tooltip direction="top" offset={[0, -4]} opacity={1} permanent={false}>
-                      Density {(hotspot.intensity * 100).toFixed(0)}%
-                    </Tooltip>
-                  </CircleMarker>
-                ))}
+                hotspotCenters.map((hotspot, idx) => {
+                  const color = getHotspotColor(hotspot.intensity);
+                  const opacity = getHotspotOpacity(hotspot.intensity);
+                  const radius = getHotspotRadius(hotspot.intensity);
+                  
+                  return (
+                    <CircleMarker
+                      key={idx}
+                      center={[hotspot.lat, hotspot.lng]}
+                      radius={radius}
+                      color={color}
+                      fillColor={color}
+                      fillOpacity={opacity}
+                      weight={2}
+                      opacity={Math.min(1.0, opacity + 0.2)}
+                    >
+                      <Tooltip direction="top" offset={[0, -4]} opacity={1} permanent={false}>
+                        <div className="text-center">
+                          <p className="font-semibold">Hotspot Density</p>
+                          <p className="text-sm">{(hotspot.intensity * 100).toFixed(1)}%</p>
+                          <p className="text-xs text-gray-500">
+                            {hotspot.intensity >= 0.75 ? 'Very High' :
+                             hotspot.intensity >= 0.5 ? 'High' :
+                             hotspot.intensity >= 0.25 ? 'Medium' : 'Low'}
+                          </p>
+                        </div>
+                      </Tooltip>
+                    </CircleMarker>
+                  );
+                })}
 
               {vessels.map((vessel) => {
-                if (!vessel.trajectory || vessel.trajectory.length === 0) return null;
                 const isSelected = selectedVessel && vessel.id === selectedVessel.id;
-                const lastPoint = vessel.trajectory[vessel.trajectory.length - 1];
+                // Use selected vessel's trajectory if available and this is the selected vessel
+                const trajectoryToUse = (isSelected && selectedVessel?.trajectory && selectedVessel.trajectory.length > 0) 
+                  ? selectedVessel.trajectory 
+                  : vessel.trajectory;
+                
+                // Skip rendering if no trajectory and not selected (selected vessels should show even without trajectory)
+                if ((!trajectoryToUse || trajectoryToUse.length === 0) && !isSelected) return null;
+                
+                // For selected vessels without trajectory, try to get position from trajectory or skip
+                const lastPoint = trajectoryToUse && trajectoryToUse.length > 0 
+                  ? trajectoryToUse[trajectoryToUse.length - 1]
+                  : null;
+                
+                if (!lastPoint) return null;
+                
                 return (
                   <React.Fragment key={vessel.id}>
-                    {showTrails && (
-                      <Polyline
-                        positions={vessel.trajectory.map((p) => [p.lat, p.lng])}
-                        pathOptions={{
-                          color: isSelected ? '#7C3AED' : '#6B7280',
-                          weight: isSelected ? 4 : 2,
-                          opacity: isSelected ? 0.9 : 0.5,
-                        }}
-                      />
-                    )}
+                    {showTrails && trajectoryToUse && trajectoryToUse.length > 0 && (() => {
+                      // Split trajectory into segments to show movement progression
+                      // Recent 20% = solid line, older 80% = progressively more dotted and lighter
+                      const totalPoints = trajectoryToUse.length;
+                      const recentThreshold = Math.max(1, Math.floor(totalPoints * 0.2)); // Last 20% is recent
+                      const recentPoints = trajectoryToUse.slice(-recentThreshold);
+                      const olderPoints = trajectoryToUse.slice(0, -recentThreshold);
+                      
+                      // Split older points into segments for progressive fading
+                      const numOlderSegments = Math.min(3, Math.max(1, Math.floor(olderPoints.length / 10)));
+                      const olderSegments: Array<Array<{ lat: number; lng: number; timestamp: string }>> = [];
+                      
+                      if (numOlderSegments > 0 && olderPoints.length > 0) {
+                        const segmentSize = Math.floor(olderPoints.length / numOlderSegments);
+                        for (let i = 0; i < numOlderSegments; i++) {
+                          const start = i * segmentSize;
+                          const end = i === numOlderSegments - 1 ? olderPoints.length : (i + 1) * segmentSize;
+                          olderSegments.push(olderPoints.slice(start, end));
+                        }
+                      }
+                      
+                      const baseColor = isSelected ? '#7C3AED' : '#6B7280';
+                      const baseWeight = isSelected ? 4 : 2;
+                      
+                      return (
+                        <>
+                          {/* Recent trajectory - solid line, full opacity */}
+                          {recentPoints.length > 1 && (
+                            <Polyline
+                              positions={recentPoints.map((p) => [p.lat, p.lng])}
+                              pathOptions={{
+                                color: baseColor,
+                                weight: baseWeight,
+                                opacity: isSelected ? 0.9 : 0.7,
+                                dashArray: undefined, // Solid line
+                              }}
+                            />
+                          )}
+                          
+                          {/* Older trajectory segments - progressively more dotted and lighter */}
+                          {olderSegments.map((segment, segmentIndex) => {
+                            if (segment.length < 2) return null;
+                            
+                            // Calculate opacity: older segments are more transparent
+                            const opacityMultiplier = 0.3 + (0.4 * (1 - segmentIndex / numOlderSegments));
+                            const opacity = (isSelected ? 0.9 : 0.5) * opacityMultiplier;
+                            
+                            // Calculate dash pattern: older segments are more dotted
+                            // Recent older segments: small dashes, oldest: very small dashes
+                            const dashRatio = 0.3 + (0.7 * (segmentIndex / numOlderSegments));
+                            const dashLength = Math.max(2, Math.floor(8 * dashRatio));
+                            const gapLength = Math.max(4, Math.floor(12 * dashRatio));
+                            
+                            return (
+                              <Polyline
+                                key={`older-${segmentIndex}`}
+                                positions={segment.map((p) => [p.lat, p.lng])}
+                                pathOptions={{
+                                  color: baseColor,
+                                  weight: Math.max(1, baseWeight - 1),
+                                  opacity: opacity,
+                                  dashArray: `${dashLength},${gapLength}`,
+                                }}
+                              />
+                            );
+                          })}
+                        </>
+                      );
+                    })()}
                     <CircleMarker
                       center={[lastPoint.lat, lastPoint.lng]}
-                      radius={10}
+                      radius={isSelected ? 12 : 10}
                       color={riskColor(vessel.risk)}
                       fillColor={riskColor(vessel.risk)}
                       fillOpacity={0.8}
-                      eventHandlers={{ click: () => setSelectedVessel(vessel) }}
+                      eventHandlers={{ click: () => handleVesselSelect(vessel) }}
                     >
                       <Tooltip direction="right" offset={[10, 0]} opacity={1}>
                         <div className="space-y-1">
                           <p className="font-semibold">{vessel.name}</p>
                           <p className="text-sm">MMSI {vessel.mmsi}</p>
                           <p className="text-sm capitalize">Risk {vessel.risk}</p>
+                          {trajectoryToUse && trajectoryToUse.length > 0 && (
+                            <p className="text-xs text-gray-500">
+                              {trajectoryToUse.length} points
+                            </p>
+                          )}
                         </div>
                       </Tooltip>
                     </CircleMarker>
-                    {showTrails && (
+                    {showTrails && vessel.predictedPoint && vessel.predictedPoint.eta && (
                       <CircleMarker
                         center={[vessel.predictedPoint.lat, vessel.predictedPoint.lng]}
                         radius={6}
@@ -681,7 +1010,7 @@ const MainPage: React.FC = () => {
                     <div className="rounded-lg border border-gray-200 p-3">
                       <p className="text-xs text-gray-500 uppercase">Avg Speed</p>
                       <p className="text-lg font-semibold text-gray-900">
-                        {selectedVessel.avgSpeed} kn
+                        {typeof selectedVessel.avgSpeed === 'number' ? selectedVessel.avgSpeed.toFixed(2) : selectedVessel.avgSpeed} kn
                       </p>
                     </div>
                     <div className="rounded-lg border border-gray-200 p-3">
@@ -693,7 +1022,7 @@ const MainPage: React.FC = () => {
                     <div className="rounded-lg border border-gray-200 p-3">
                       <p className="text-xs text-gray-500 uppercase">Time Disabled</p>
                       <p className="text-lg font-semibold text-gray-900">
-                        {selectedVessel.timeDisabledHours} hrs
+                        {typeof selectedVessel.timeDisabledHours === 'number' ? selectedVessel.timeDisabledHours.toFixed(2) : selectedVessel.timeDisabledHours} hrs
                       </p>
                     </div>
                   </div>

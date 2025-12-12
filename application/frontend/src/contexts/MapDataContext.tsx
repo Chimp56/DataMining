@@ -151,16 +151,96 @@ export const MapDataProvider: React.FC<{ children: ReactNode }> = ({ children })
         }
       }
 
-      // Load from API
-      const response = await apiService.getMPAForMap({ limit: 1000 });
-      if (response.data && response.data.items) {
-        setMpaData(response.data.items);
-        saveMPAToCache(response.data.items);
-        console.log(`Loaded ${response.data.items.length} MPAs from API`);
+      // Load from API with timeout and progressive loading
+      console.log('Loading MPA data from API...');
+      let response;
+      const initialLimit = 100; // Start small for faster response
+      try {
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('MPA API call timed out after 60 seconds')), 60000)
+        );
+        
+        // First, load a small batch quickly
+        response = await Promise.race([
+          apiService.getMPAForMap({ limit: initialLimit, simplify_tolerance: 0.01 }),
+          timeoutPromise
+        ]) as any;
+        
+        console.log('MPA API Response received:', response);
+        console.log('MPA API Response.data:', response?.data);
+        console.log('MPA API Response.data.items:', response?.data?.items);
+        console.log('MPA API Response.data.items type:', typeof response?.data?.items);
+        console.log('MPA API Response.data.items isArray:', Array.isArray(response?.data?.items));
+      } catch (apiErr: any) {
+        console.error('MPA API call failed:', apiErr);
+        console.error('MPA API error details:', {
+          message: apiErr?.message,
+          response: apiErr?.response,
+          status: apiErr?.response?.status,
+          data: apiErr?.response?.data
+        });
+        throw apiErr; // Re-throw to be caught by outer catch
+      }
+      
+      if (response && response.data) {
+        // Check if items exists and is an array
+        const items = response.data.items;
+        if (items && Array.isArray(items)) {
+          console.log(`MPA items received: ${items.length}`, items.length > 0 ? items.slice(0, 2) : 'empty array');
+          if (items.length > 0) {
+            setMpaData(items);
+            saveMPAToCache(items);
+            console.log(`✓ Loaded ${items.length} MPAs from API (initial batch)`);
+            
+            // Load full dataset in background if we got a partial result
+            if (items.length === initialLimit) {
+              console.log('Loading full MPA dataset in background...');
+              apiService.getMPAForMap({ limit: 1000, simplify_tolerance: 0.001 })
+                .then((fullResponse) => {
+                  if (fullResponse?.data?.items && Array.isArray(fullResponse.data.items) && fullResponse.data.items.length > items.length) {
+                    setMpaData(fullResponse.data.items);
+                    saveMPAToCache(fullResponse.data.items);
+                    console.log(`✓ Loaded full MPA dataset: ${fullResponse.data.items.length} MPAs`);
+                  }
+                })
+                .catch((err) => {
+                  console.warn('Background MPA load failed:', err);
+                  // Keep the initial batch
+                });
+            }
+          } else {
+            console.warn('MPA API returned empty items array');
+            setMpaData([]);
+          }
+        } else if (items === undefined || items === null) {
+          console.warn('MPA API response missing items array. Response structure:', {
+            hasData: !!response.data,
+            dataKeys: response.data ? Object.keys(response.data) : [],
+            dataValues: response.data,
+            fullResponse: response
+          });
+          setMpaData([]);
+        } else {
+          console.warn('MPA API response items is not an array:', {
+            type: typeof items,
+            value: items,
+            constructor: items?.constructor?.name
+          });
+          setMpaData([]);
+        }
+      } else {
+        console.warn('MPA API response missing data property. Full response:', response);
+        setMpaData([]);
       }
     } catch (err: any) {
       console.error('Error loading MPA data:', err);
+      console.error('Error details:', {
+        message: err.message,
+        response: err.response,
+        stack: err.stack
+      });
       setError(err.message || 'Failed to load MPA data');
+      setMpaData([]); // Set empty array on error
     }
   };
 
@@ -178,13 +258,20 @@ export const MapDataProvider: React.FC<{ children: ReactNode }> = ({ children })
       setLoading(true);
       setError(null);
       
-      // Load both in parallel
-      await Promise.all([
-        loadEEZBoundaries(),
-        loadMPAData()
-      ]);
+      console.log('MapDataContext: Starting to load map data...');
       
-      setLoading(false);
+      // Load both in parallel, but handle errors separately
+      try {
+        await Promise.allSettled([
+          loadEEZBoundaries(),
+          loadMPAData()
+        ]);
+        console.log('MapDataContext: Finished loading map data');
+      } catch (err) {
+        console.error('MapDataContext: Error loading map data:', err);
+      } finally {
+        setLoading(false);
+      }
     };
 
     loadAllData();

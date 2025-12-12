@@ -33,6 +33,15 @@ logger = logging.getLogger(__name__)
 _eez_gdf_cache = None
 _eez_gdf_cache_path = None
 
+# In-memory cache for MPA GeoDataFrame
+_mpa_gdf_cache = None
+_mpa_gdf_cache_paths = None
+
+# In-memory cache for predictions (only caches small initial batches, not full dataset)
+_predictions_cache = None
+_predictions_cache_time = None
+_predictions_cache_ttl_seconds = 300  # Cache for 5 minutes
+
 app = FastAPI(
     title="DataMining API",
     description="API for serving vessel and geographic data",
@@ -540,6 +549,7 @@ async def get_eez_boundaries_for_map(
 async def get_mpa_for_map(
     iso3: Optional[str] = Query(None, description="Filter by ISO3 country code"),
     limit: int = Query(1000, ge=1, le=5000),
+    simplify_tolerance: float = Query(0.001, ge=0.0, le=1.0, description="Tolerance for geometry simplification (e.g., 0.001)"),
     db: Session = Depends(get_db)
 ):
     """Get MPA data for map display with geometry from shapefile."""
@@ -547,15 +557,15 @@ async def get_mpa_for_map(
         import geopandas as gpd
     except ImportError:
         logger.warning("geopandas not available, returning metadata only")
-        # Fallback to metadata only
+        # Fallback to metadata only - optimize query
         try:
-            query = db.query(MPA)
+            # Only select columns we need
+            query = db.query(MPA.wdpaid, MPA.name, MPA.orig_name, MPA.desig_eng, MPA.iucn_cat, MPA.iso3, MPA.gis_m_area, MPA.status)
             if iso3:
                 query = query.filter(MPA.iso3 == iso3.upper())
             items = query.limit(limit).all()
             return {
                 "items": [{
-                    "id": item.id,
                     "wdpaid": item.wdpaid,
                     "name": item.name,
                     "orig_name": item.orig_name,
@@ -570,6 +580,8 @@ async def get_mpa_for_map(
             }
         except Exception as e:
             logger.error(f"Error loading MPA metadata: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=f"Failed to load MPA data: {str(e)}")
         logger.warning("geopandas not available, returning metadata only")
         # Fallback to metadata only
@@ -610,20 +622,20 @@ async def get_mpa_for_map(
     
     if not existing_shapefiles:
         logger.warning("MPA shapefiles not found, returning metadata only")
-        query = db.query(MPA)
+        # Optimize query - only select needed columns
+        query = db.query(MPA.wdpaid, MPA.name, MPA.orig_name, MPA.desig_eng, MPA.iucn_cat, MPA.iso3, MPA.gis_m_area, MPA.status)
         if iso3:
             query = query.filter(MPA.iso3 == iso3.upper())
         items = query.limit(limit).all()
         return {
             "items": [{
-                "id": item.id,
                 "wdpaid": item.wdpaid,
                 "name": item.name,
                 "orig_name": item.orig_name,
                 "desig_eng": item.desig_eng,
                 "iucn_cat": item.iucn_cat,
                 "iso3": item.iso3,
-                "gis_m_area": item.gis_m_area,
+                "gis_m_area": float(item.gis_m_area) if item.gis_m_area else None,
                 "status": item.status,
             } for item in items],
             "total": len(items),
@@ -631,23 +643,49 @@ async def get_mpa_for_map(
         }
     
     try:
-        # Load and combine all MPA shapefiles
-        gdf_list = []
-        for shapefile_path in existing_shapefiles:
-            gdf_part = gpd.read_file(str(shapefile_path))
-            gdf_list.append(gdf_part)
+        # Load and combine all MPA shapefiles with caching
+        global _mpa_gdf_cache, _mpa_gdf_cache_paths
+        shapefile_paths_str = [str(p) for p in existing_shapefiles]
         
-        if gdf_list:
-            gdf = gpd.GeoDataFrame(pd.concat(gdf_list, ignore_index=True))
-            gdf = gdf.to_crs(4326)  # Ensure WGS84
+        # Check if we have a cached version and the files haven't changed
+        if _mpa_gdf_cache is None or _mpa_gdf_cache_paths != shapefile_paths_str:
+            logger.info("Loading MPA shapefiles (this may take a moment)...")
+            gdf_list = []
+            for shapefile_path in existing_shapefiles:
+                logger.info(f"Loading MPA shapefile: {shapefile_path}")
+                gdf_part = gpd.read_file(str(shapefile_path))
+                gdf_list.append(gdf_part)
+            
+            if gdf_list:
+                logger.info(f"Combining {len(gdf_list)} MPA shapefiles...")
+                gdf = gpd.GeoDataFrame(pd.concat(gdf_list, ignore_index=True))
+                gdf = gdf.to_crs(4326)  # Ensure WGS84
+                # Simplify geometries for faster rendering
+                if simplify_tolerance > 0:
+                    try:
+                        gdf['geometry'] = gdf['geometry'].simplify(tolerance=simplify_tolerance, preserve_topology=True)
+                        logger.info(f"Simplified MPA geometries with tolerance {simplify_tolerance}")
+                    except Exception as simplify_err:
+                        logger.warning(f"Could not simplify MPA geometries: {simplify_err}, using original")
+                
+                # Cache the GeoDataFrame
+                _mpa_gdf_cache = gdf
+                _mpa_gdf_cache_paths = shapefile_paths_str
+                logger.info(f"Cached MPA GeoDataFrame ({len(gdf)} features)")
+            else:
+                gdf = gpd.GeoDataFrame()
+                _mpa_gdf_cache = gdf
+                _mpa_gdf_cache_paths = shapefile_paths_str
         else:
-            gdf = gpd.GeoDataFrame()
+            gdf = _mpa_gdf_cache
+            logger.debug("Using cached MPA GeoDataFrame")
         
-        # Get metadata from database to filter
-        query = db.query(MPA)
+        # Get metadata from database to filter - optimize query
+        query = db.query(MPA.wdpaid, MPA.name, MPA.orig_name, MPA.desig_eng, MPA.iucn_cat, MPA.iso3, MPA.gis_m_area, MPA.status)
         if iso3:
             query = query.filter(MPA.iso3 == iso3.upper())
         
+        # Only get the columns we need, limit early
         db_items = query.limit(limit).all()
         wdpaids = [item.wdpaid for item in db_items if item.wdpaid is not None]
         
@@ -669,18 +707,25 @@ async def get_mpa_for_map(
             logger.warning("No MPA geometry data available")
             gdf_filtered = gpd.GeoDataFrame()
         
-        # Convert to GeoJSON
+        # Convert to GeoJSON - optimize by processing in batches
         items = []
         if len(gdf_filtered) > 0:
+            # Create a lookup dict for faster database item matching
+            db_items_dict = {item.wdpaid: item for item in db_items if item.wdpaid is not None}
+            
+            # Convert to GeoJSON - this is the slow part, so we'll limit if needed
+            logger.info(f"Converting {len(gdf_filtered)} MPA features to GeoJSON...")
             geojson_str = gdf_filtered.to_json()
             geojson_data = json.loads(geojson_str)
             
+            # Process features with optimized lookup
             for feature in geojson_data.get('features', []):
                 props = feature.get('properties', {})
                 geometry = feature.get('geometry')
                 
                 wdpaid = props.get('WDPAID')
-                db_item = next((item for item in db_items if item.wdpaid == wdpaid), None) if wdpaid else None
+                # Use dict lookup instead of next() for O(1) instead of O(n)
+                db_item = db_items_dict.get(int(wdpaid)) if wdpaid else None
                 
                 items.append({
                     "wdpaid": int(wdpaid) if wdpaid else None,
@@ -693,6 +738,8 @@ async def get_mpa_for_map(
                     "status": props.get('STATUS') or (db_item.status if db_item else None),
                     "geometry": geometry  # GeoJSON geometry
                 })
+            
+            logger.info(f"Processed {len(items)} MPA features")
         
         return {
             "items": items,
@@ -701,21 +748,22 @@ async def get_mpa_for_map(
         }
     except Exception as e:
         logger.error(f"Error loading MPA shapefile: {e}")
-        # Fallback to database query
-        query = db.query(MPA)
+        import traceback
+        logger.error(traceback.format_exc())
+        # Fallback to database query - optimize
+        query = db.query(MPA.wdpaid, MPA.name, MPA.orig_name, MPA.desig_eng, MPA.iucn_cat, MPA.iso3, MPA.gis_m_area, MPA.status)
         if iso3:
             query = query.filter(MPA.iso3 == iso3.upper())
         items = query.limit(limit).all()
         return {
             "items": [{
-                "id": item.id,
                 "wdpaid": item.wdpaid,
                 "name": item.name,
                 "orig_name": item.orig_name,
                 "desig_eng": item.desig_eng,
                 "iucn_cat": item.iucn_cat,
                 "iso3": item.iso3,
-                "gis_m_area": item.gis_m_area,
+                "gis_m_area": float(item.gis_m_area) if item.gis_m_area else None,
                 "status": item.status,
             } for item in items],
             "total": len(items),
@@ -825,16 +873,66 @@ async def get_predictions(
     riskLevel: Optional[str] = Query(None, description="Risk level filter"),
     limit: int = Query(50, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    use_cache: bool = Query(True, description="Use cached predictions if available"),
     db: Session = Depends(get_db)
 ):
-    """Get predictions by combining R API anomaly scores with vessel features."""
+    """Get predictions from database (R API currently disabled).
+    
+    Results are cached for 5 minutes to improve performance.
+    """
+    global _predictions_cache, _predictions_cache_time
+    
+    # Create cache key based on filters and pagination (only cache small initial batches)
+    cache_key = f"{timeframe}_{riskLevel or 'all'}_{offset}_{limit}"
+    
     try:
-        # Get top scores from R API
-        top_n = limit + offset
-        r_scores = await r_api_client.get_top_scores(top_n=top_n)
+        # Only check cache for small initial requests (first page, small limit)
+        # This allows fast initial load without caching entire dataset
+        is_initial_request = offset == 0 and limit <= 100
+        if use_cache and is_initial_request and _predictions_cache is not None and _predictions_cache_time is not None:
+            cache_age = (datetime.now() - _predictions_cache_time).total_seconds()
+            if cache_age < _predictions_cache_ttl_seconds:
+                cached_data = _predictions_cache.get(cache_key)
+                if cached_data:
+                    logger.info(f"Returning {len(cached_data['items'])} predictions from cache (age: {cache_age:.1f}s)")
+                    return {
+                        "items": cached_data['items'],
+                        "total": cached_data['total'],
+                        "page": (offset // limit) + 1,
+                        "page_size": limit,
+                        "cached": True
+                    }
         
-        if not r_scores:
-            # Fallback to database if R API unavailable
+        if is_initial_request:
+            logger.info(f"Loading initial batch of {limit} predictions...")
+        else:
+            logger.info(f"Loading predictions page {offset // limit + 1} (offset: {offset}, limit: {limit})...")
+        
+        # R API is currently disabled due to stability issues
+        # Skip R API and use database only
+        r_scores = None
+        logger.info("R API disabled - using database scores only")
+        
+        # Always use database fallback (R API disabled)
+        if True:  # Changed from "if not r_scores:" to always use database
+            # Database-only path (R API disabled)
+            # Check cache first
+            cache_key_db = f"{cache_key}_db"
+            is_initial_request_db = offset == 0 and limit <= 100
+            if use_cache and is_initial_request_db and _predictions_cache is not None and _predictions_cache_time is not None:
+                cache_age = (datetime.now() - _predictions_cache_time).total_seconds()
+                if cache_age < _predictions_cache_ttl_seconds:
+                    cached_data = _predictions_cache.get(cache_key_db)
+                    if cached_data and cached_data.get('items'):
+                        logger.info(f"Returning {len(cached_data['items'])} predictions from cache (DB fallback, age: {cache_age:.1f}s)")
+                        return {
+                            "items": cached_data['items'],
+                            "total": cached_data.get('total', len(cached_data['items'])),
+                            "page": (offset // limit) + 1,
+                            "page_size": limit,
+                            "cached": True
+                        }
+            
             # Deduplicate by MMSI at the ORM level - get max anomaly_score per MMSI
             subquery = db.query(
                 MMSIAnomalyScore.mmsi,
@@ -850,8 +948,9 @@ async def get_predictions(
                 )
             ).order_by(MMSIAnomalyScore.anomaly_score.desc())
             
+            # Only get the scores for the requested page (not all scores)
             scores = query.offset(offset).limit(limit).all()
-            items = []
+            all_items = []
             for score in scores:
                 # Get vessel features
                 vessel = db.query(VesselFeatures).filter(
@@ -879,38 +978,131 @@ async def get_predictions(
                 elif score.anomaly_score >= 0.6:
                     risk_level = "medium"
                 
-                # Extract location data
+                # Extract location data - ensure we always have valid coordinates
                 lat = None
                 lng = None
                 last_seen = None
                 if last_position:
-                    lat = float(last_position.cell_ll_lat) + 0.05 if last_position.cell_ll_lat is not None else None
-                    lng = float(last_position.cell_ll_lon) + 0.05 if last_position.cell_ll_lon is not None else None
+                    if last_position.cell_ll_lat is not None and last_position.cell_ll_lon is not None:
+                        try:
+                            lat = float(last_position.cell_ll_lat) + 0.05
+                            lng = float(last_position.cell_ll_lon) + 0.05
+                            # Validate coordinates are within valid range
+                            if not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
+                                logger.warning(f"Invalid coordinates for MMSI {score.mmsi}: lat={lat}, lng={lng}")
+                                lat = None
+                                lng = None
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"Failed to parse coordinates for MMSI {score.mmsi}: {e}")
+                            lat = None
+                            lng = None
+                    else:
+                        logger.debug(f"MMSI {score.mmsi} has position record but missing coordinates")
+                    
                     if last_seen_date:
                         if hasattr(last_seen_date, 'isoformat'):
                             last_seen = last_seen_date.isoformat()
                         else:
                             last_seen = str(last_seen_date)
                 
-                items.append({
+                # If no coordinates found, try to get any position for this MMSI (not just the latest)
+                if lat is None or lng is None:
+                    try:
+                        any_position = db.query(MMSIDaily).filter(
+                            MMSIDaily.mmsi == score.mmsi,
+                            MMSIDaily.cell_ll_lat.isnot(None),
+                            MMSIDaily.cell_ll_lon.isnot(None)
+                        ).order_by(MMSIDaily.date.desc()).first()
+                        
+                        if any_position:
+                            try:
+                                lat = float(any_position.cell_ll_lat) + 0.05
+                                lng = float(any_position.cell_ll_lon) + 0.05
+                                if not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
+                                    lat = None
+                                    lng = None
+                            except (ValueError, TypeError):
+                                lat = None
+                                lng = None
+                    except Exception as e:
+                        logger.debug(f"Could not find any position for MMSI {score.mmsi}: {e}")
+                
+                # Extract vessel metadata for easy frontend access
+                vessel_features_dict = VesselFeaturesResponse.from_orm(vessel).dict() if vessel else {}
+                
+                # Build item with all required fields for frontend (both flat and nested)
+                item = {
                     "id": str(score.id),
                     "mmsi": str(score.mmsi),
+                    "vesselName": f"Vessel {score.mmsi}",  # Frontend expects vesselName
                     "anomaly_score": float(score.anomaly_score),
+                    "riskScore": int(float(score.anomaly_score) * 100),  # Frontend expects riskScore
                     "risk_level": risk_level,
-                    "vessel_features": VesselFeaturesResponse.from_orm(vessel).dict() if vessel else None,
+                    "confidence": int(min(float(score.anomaly_score) * 100 + 10, 99)),  # Frontend expects confidence
+                    "factors": [],  # Will be populated from vessel features
+                    "predictedBehavior": f"Anomaly score ({float(score.anomaly_score):.2f}) indicates suspicious activity",
+                    "timestamp": last_seen if last_seen else (f"{vessel.year}-01-01" if vessel and vessel.year else "N/A"),
+                    "status": "pending",
+                    "vessel_features": vessel_features_dict,
+                    # Add flat fields for easy frontend access
+                    "flag": vessel_features_dict.get("flag_ais") or vessel_features_dict.get("flag_registry") or vessel_features_dict.get("flag_gfw") or "UNK",
+                    "vessel_type": vessel_features_dict.get("vessel_class_inferred") or vessel_features_dict.get("vessel_class_registry") or vessel_features_dict.get("vessel_class_gfw") or "Unknown",
+                    "tonnage": float(vessel_features_dict.get("tonnage_gt_inferred") or vessel_features_dict.get("tonnage_gt_registry") or vessel_features_dict.get("tonnage_gt_gfw") or 0),
+                    "avg_speed": float(vessel_features_dict.get("mean_speed") or 0),
+                    "eez_crossings": int(vessel_features_dict.get("eez_crossings") or 0),
+                    "time_disabled_hours": float(vessel_features_dict.get("total_disable_hours") or 0),
                     "lat": lat,
                     "lng": lng,
                     "last_seen": last_seen,
-                })
+                }
+                
+                # Log if coordinates are missing
+                if lat is None or lng is None:
+                    logger.debug(f"MMSI {score.mmsi} has no coordinates (no position in mmsi_daily)")
+                
+                # Add risk factors from vessel features
+                if vessel:
+                    if vessel.n_disabling_events and vessel.n_disabling_events > 5:
+                        item["factors"].append(f"Frequent AIS disabling ({vessel.n_disabling_events} events)")
+                    if vessel.eez_crossings and vessel.eez_crossings > 10:
+                        item["factors"].append(f"Multiple EEZ crossings ({vessel.eez_crossings})")
+                    if vessel.mpa_crossings and vessel.mpa_crossings > 0:
+                        item["factors"].append(f"MPA crossings detected ({vessel.mpa_crossings})")
+                    if vessel.is_known_iuu:
+                        item["factors"].append("Known IUU vessel")
+                    if vessel.pct_in_eez and vessel.pct_in_eez > 0.8:
+                        item["factors"].append("High percentage of operations in EEZ")
+                
+                if not item["factors"]:
+                    item["factors"] = ["Anomalous behavior pattern detected"]
+                
+                all_items.append(item)
             
-            # Get total count of unique MMSIs
+            # Filter by risk level if specified
+            if riskLevel and riskLevel != "all":
+                all_items = [item for item in all_items if item.get("risk_level") == riskLevel]
+            
+            # Get total count efficiently
             total_unique = db.query(func.count(func.distinct(MMSIAnomalyScore.mmsi))).scalar()
             
+            # Only cache small initial requests
+            is_initial_request = offset == 0 and limit <= 100
+            if is_initial_request:
+                if _predictions_cache is None:
+                    _predictions_cache = {}
+                _predictions_cache[cache_key_db] = {
+                    'items': all_items,
+                    'total': total_unique
+                }
+                _predictions_cache_time = datetime.now()
+                logger.info(f"Cached initial batch of {len(all_items)} predictions for key '{cache_key_db}' (DB fallback)")
+            
             return {
-                "items": items,
+                "items": all_items,
                 "total": total_unique,
                 "page": (offset // limit) + 1,
                 "page_size": limit,
+                "cached": False
             }
         
         # Process R API scores and enrich with database data
@@ -937,33 +1129,65 @@ async def get_predictions(
                     if mmsi not in r_api_scores_map or anomaly_score > r_api_scores_map[mmsi]:
                         r_api_scores_map[mmsi] = anomaly_score
         
-        # Get all unique MMSIs from database, then apply R API scores if available
-        db_scores_all = db_unique_query.all()
-        
-        # Merge: use R API scores if available, otherwise use database scores
+        # Merge R API scores with database scores efficiently
+        # Strategy: If we have R API scores, use them primarily. Otherwise use database.
         final_scores = []
-        for row in db_scores_all:
-            mmsi = row.mmsi
-            # Prefer R API score if available, otherwise use database score
-            anomaly_score = r_api_scores_map.get(mmsi, float(row.anomaly_score))
-            final_scores.append({
-                "mmsi": mmsi,
-                "anomaly_score": anomaly_score
-            })
         
-        # Add any R API MMSIs not in database
-        for mmsi, r_score in r_api_scores_map.items():
-            if not any(score["mmsi"] == mmsi for score in final_scores):
-                final_scores.append({
-                    "mmsi": mmsi,
-                    "anomaly_score": r_score
-                })
-        
-        # Sort by anomaly score descending
-        final_scores.sort(key=lambda x: x["anomaly_score"], reverse=True)
-        
-        # Apply pagination
-        paginated_scores = final_scores[offset:offset+limit]
+        try:
+            if r_api_scores_map:
+                logger.info(f"Merging {len(r_api_scores_map)} R API scores with database scores")
+                # If we have R API scores, use them as primary source
+                # Get database scores only for MMSIs not in R API (limited to reasonable number)
+                db_scores_limited = db_unique_query.limit(10000).all()  # Limit to prevent memory issues
+                db_scores_map = {row.mmsi: float(row.anomaly_score) for row in db_scores_limited}
+                logger.info(f"Loaded {len(db_scores_map)} database scores for merging")
+                
+                # Start with R API scores
+                for mmsi, r_score in r_api_scores_map.items():
+                    final_scores.append({
+                        "mmsi": mmsi,
+                        "anomaly_score": r_score
+                    })
+                
+                # Add database scores for MMSIs not in R API (up to a reasonable limit)
+                for mmsi, db_score in db_scores_map.items():
+                    if mmsi not in r_api_scores_map:
+                        final_scores.append({
+                            "mmsi": mmsi,
+                            "anomaly_score": db_score
+                        })
+            else:
+                logger.info("No R API scores, using database scores only")
+                # No R API scores, use database scores with pagination
+                # Only get the scores we need for the current page + some buffer
+                db_scores_needed = db_unique_query.offset(offset).limit(limit + 100).all()
+                logger.info(f"Loaded {len(db_scores_needed)} database scores for page {offset // limit + 1}")
+                for row in db_scores_needed:
+                    final_scores.append({
+                        "mmsi": row.mmsi,
+                        "anomaly_score": float(row.anomaly_score)
+                    })
+            
+            logger.info(f"Total final_scores before sorting: {len(final_scores)}")
+            
+            # Sort by anomaly score descending
+            final_scores.sort(key=lambda x: x["anomaly_score"], reverse=True)
+            
+            # Only build items for the requested page (not all items)
+            # This is much faster and doesn't require caching everything
+            paginated_scores = final_scores[offset:offset+limit]
+            logger.info(f"Paginated to {len(paginated_scores)} scores for page {offset // limit + 1}")
+        except Exception as e:
+            logger.error(f"Error merging scores: {e}", exc_info=True)
+            # Fallback: try to get at least some scores from database
+            try:
+                db_scores_fallback = db_unique_query.offset(offset).limit(limit).all()
+                final_scores = [{"mmsi": row.mmsi, "anomaly_score": float(row.anomaly_score)} for row in db_scores_fallback]
+                paginated_scores = final_scores
+                logger.warning(f"Using fallback: loaded {len(paginated_scores)} scores from database")
+            except Exception as fallback_err:
+                logger.error(f"Fallback also failed: {fallback_err}", exc_info=True)
+                paginated_scores = []
         
         items = []
         for score_info in paginated_scores:
@@ -996,10 +1220,6 @@ async def get_predictions(
                 risk_level = "high"
             elif anomaly_score >= 0.6:
                 risk_level = "medium"
-            
-            # Filter by risk level if specified
-            if riskLevel and riskLevel != "all" and risk_level != riskLevel:
-                continue
             
             # Build factors list from vessel features
             factors = []
@@ -1036,7 +1256,7 @@ async def get_predictions(
             else:
                 timestamp = "N/A"
             
-            items.append({
+            item = {
                 "id": f"r_{mmsi}",
                 "mmsi": str(mmsi),
                 "vesselName": f"Vessel {mmsi}",  # Could be enhanced with actual name lookup
@@ -1052,16 +1272,35 @@ async def get_predictions(
                 "lat": lat,
                 "lng": lng,
                 "last_seen": last_seen,
-            })
+            }
+            
+            # Filter by risk level if specified
+            if riskLevel and riskLevel != "all" and risk_level != riskLevel:
+                continue
+            
+            items.append(item)
         
-        # Get total count of unique MMSIs from database
+        # Get total count efficiently (without loading all data)
         total_unique = db.query(func.count(func.distinct(MMSIAnomalyScore.mmsi))).scalar()
+        
+        # Only cache small initial requests for fast subsequent loads
+        is_initial_request = offset == 0 and limit <= 100
+        if is_initial_request:
+            if _predictions_cache is None:
+                _predictions_cache = {}
+            _predictions_cache[cache_key] = {
+                'items': items,
+                'total': total_unique
+            }
+            _predictions_cache_time = datetime.now()
+            logger.info(f"Cached initial batch of {len(items)} predictions for key '{cache_key}'")
         
         return {
             "items": items,
             "total": total_unique,
             "page": (offset // limit) + 1,
             "page_size": limit,
+            "cached": False
         }
     except HTTPException:
         raise

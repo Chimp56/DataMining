@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { MapIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import { TileLayer, CircleMarker, HeatmapLayer, Popup } from 'react-leaflet';
 import MapWrapper from '../components/MapWrapper';
 import { apiService } from '../services/api';
+import hotspotDataRaw from '../utils/HOTSPOT_FINAL_DATA.json';
 
 interface FishingCell {
   lat: number;
@@ -24,6 +25,37 @@ interface AISEvent {
   mmsi?: string;
 }
 
+interface HotspotDataFile {
+  metadata?: {
+    selected_year?: number;
+    selected_month?: number;
+    selected_month_fishing_hours?: number;
+    selected_month_ais_events?: number;
+    num_fishing_cells?: number;
+    num_ais_events?: number;
+    num_fishing_clusters?: number;
+    num_ais_clusters?: number;
+  };
+  temporal_summary?: Array<{ year: number; month: number; hrs: number; ais_events: number }>;
+  fishing_cells?: Array<{ lat: number; lon: number; fishing_hours: number }>;
+  fishing_cluster_centers?: Array<{ cluster: number; lat: number; lon: number }>;
+  fishing_cluster_summary?: any;
+  fishing_heatmap_grid?: any;
+  fishing_top2?: any;
+  ais_events?: Array<{
+    gap_id?: string;
+    mmsi?: number;
+    gap_start_lat?: number;
+    gap_start_lon?: number;
+    gap_start_timestamp?: string;
+    year?: number;
+    month?: number;
+  }>;
+  ais_unique_points?: Array<{ lat: number; lon: number; cluster: number }>;
+  ais_cluster_centers?: Array<{ cluster: number; lat: number; lon: number }>;
+  ais_cluster_summary?: any;
+}
+
 interface HotspotData {
   status: string;
   year: number;
@@ -39,6 +71,47 @@ interface HotspotData {
     ais_hotspot_count: number;
   };
 }
+
+const hotspotData = hotspotDataRaw as HotspotDataFile;
+
+// Helper function to get hotspot color based on intensity (0-1)
+const getHotspotColor = (intensity: number): string => {
+  if (intensity <= 0.25) {
+    const ratio = intensity / 0.25;
+    const r = Math.round(34 + (220 - 34) * ratio);
+    const g = Math.round(197 + (220 - 197) * ratio);
+    const b = Math.round(34 + (20 - 34) * ratio);
+    return `rgb(${r}, ${g}, ${b})`;
+  } else if (intensity <= 0.5) {
+    const ratio = (intensity - 0.25) / 0.25;
+    const r = Math.round(220 + (255 - 220) * ratio);
+    const g = Math.round(220 + (255 - 220) * ratio);
+    const b = Math.round(20 - 20 * ratio);
+    return `rgb(${r}, ${g}, ${b})`;
+  } else if (intensity <= 0.75) {
+    const ratio = (intensity - 0.5) / 0.25;
+    const r = 255;
+    const g = Math.round(255 - (140 - 100) * ratio);
+    const b = 0;
+    return `rgb(${r}, ${g}, ${b})`;
+  } else {
+    const ratio = (intensity - 0.75) / 0.25;
+    const r = 255;
+    const g = Math.round(140 - 140 * ratio);
+    const b = 0;
+    return `rgb(${r}, ${g}, ${b})`;
+  }
+};
+
+// Helper function to get hotspot opacity based on intensity
+const getHotspotOpacity = (intensity: number): number => {
+  return 0.3 + (intensity * 0.6);
+};
+
+// Helper function to get hotspot radius based on intensity
+const getHotspotRadius = (intensity: number): number => {
+  return 8 + (intensity * 17);
+};
 
 const Hotspots: React.FC = () => {
   const [data, setData] = useState<HotspotData | null>(null);
@@ -59,42 +132,117 @@ const Hotspots: React.FC = () => {
     try {
       setLoading(true);
       setError(null);
-      const response = await apiService.getGlobalHotspots({
-        start_year: startYear,
-        end_year: endYear,
-      });
       
-      if (response.data && response.data.status === 'success') {
-        setData(response.data);
-      } else {
-        setError(response.data?.error || 'Failed to load hotspots');
-      }
+      // Use local hotspot data from JSON file
+      const metadata = hotspotData.metadata || {};
+      const selectedYear = metadata.selected_year || 2017;
+      const selectedMonth = metadata.selected_month || 9;
+      
+      // Process fishing cells
+      const fishingCells: FishingCell[] = (hotspotData.fishing_cells || []).map((cell: any) => ({
+        lat: cell.lat || 0,
+        lon: cell.lon || 0,
+        fishing_hours: cell.fishing_hours || 0,
+      }));
+      
+      // Process fishing cluster centers as hotspots
+      const fishingHotspots: Hotspot[] = (hotspotData.fishing_cluster_centers || []).map((cluster: any) => ({
+        lat: cluster.lat || 0,
+        lon: cluster.lon || 0,
+        cluster: cluster.cluster || 0,
+      }));
+      
+      // Process AIS events
+      const aisEvents: AISEvent[] = (hotspotData.ais_events || [])
+        .filter((event: any) => event.gap_start_lat != null && event.gap_start_lon != null)
+        .map((event: any) => ({
+          gap_start_lat: event.gap_start_lat || 0,
+          gap_start_lon: event.gap_start_lon || 0,
+          gap_start_timestamp: event.gap_start_timestamp || event.ts || '',
+          mmsi: event.mmsi ? String(event.mmsi) : undefined,
+        }));
+      
+      // Process AIS cluster centers as hotspots
+      const aisHotspots: Hotspot[] = (hotspotData.ais_cluster_centers || []).map((cluster: any) => ({
+        lat: cluster.lat || 0,
+        lon: cluster.lon || 0,
+        cluster: cluster.cluster || 0,
+      }));
+      
+      // Build summary
+      const summary = {
+        total_fishing_cells: metadata.num_fishing_cells || fishingCells.length,
+        total_ais_events: metadata.num_ais_events || aisEvents.length,
+        fishing_hotspot_count: metadata.num_fishing_clusters || fishingHotspots.length,
+        ais_hotspot_count: metadata.num_ais_clusters || aisHotspots.length,
+      };
+      
+      const processedData: HotspotData = {
+        status: 'success',
+        year: selectedYear,
+        month: selectedMonth,
+        fishing_cells: fishingCells,
+        fishing_hotspots: fishingHotspots,
+        ais_events: aisEvents,
+        ais_hotspots: aisHotspots,
+        summary: summary,
+      };
+      
+      setData(processedData);
+      console.log('Hotspot data loaded from local file:', {
+        fishingCells: fishingCells.length,
+        fishingHotspots: fishingHotspots.length,
+        aisEvents: aisEvents.length,
+        aisHotspots: aisHotspots.length,
+      });
     } catch (err: any) {
-      setError(err.response?.data?.detail || err.message || 'Failed to load hotspots');
+      setError(err.message || 'Failed to load hotspots');
       console.error('Error loading hotspots:', err);
     } finally {
       setLoading(false);
     }
   };
 
-  // Calculate map bounds from data
-  const getMapBounds = () => {
+  // Calculate map bounds from data using useMemo to avoid recalculating
+  const bounds = useMemo(() => {
     if (!data || data.fishing_cells.length === 0) {
       return { center: [20, 0] as [number, number], zoom: 2 };
     }
     
-    const lats = data.fishing_cells.map(c => c.lat);
-    const lons = data.fishing_cells.map(c => c.lon);
+    // Use a sample of cells for bounds calculation to avoid stack overflow
+    // Sample up to 10000 cells for performance
+    const sampleSize = Math.min(10000, data.fishing_cells.length);
+    const sampleCells = data.fishing_cells.slice(0, sampleSize);
+    
+    // Calculate min/max without spread operator to avoid stack overflow
+    let minLat = Infinity;
+    let maxLat = -Infinity;
+    let minLon = Infinity;
+    let maxLon = -Infinity;
+    
+    for (const cell of sampleCells) {
+      if (cell.lat != null && !isNaN(cell.lat)) {
+        minLat = Math.min(minLat, cell.lat);
+        maxLat = Math.max(maxLat, cell.lat);
+      }
+      if (cell.lon != null && !isNaN(cell.lon)) {
+        minLon = Math.min(minLon, cell.lon);
+        maxLon = Math.max(maxLon, cell.lon);
+      }
+    }
+    
+    // If no valid coordinates found, use default
+    if (minLat === Infinity || minLon === Infinity) {
+      return { center: [20, 0] as [number, number], zoom: 2 };
+    }
     
     const center: [number, number] = [
-      (Math.max(...lats) + Math.min(...lats)) / 2,
-      (Math.max(...lons) + Math.min(...lons)) / 2,
+      (maxLat + minLat) / 2,
+      (maxLon + minLon) / 2,
     ];
     
     return { center, zoom: 3 };
-  };
-
-  const bounds = getMapBounds();
+  }, [data]);
 
   return (
     <div className="space-y-6">
@@ -292,45 +440,66 @@ const Hotspots: React.FC = () => {
               />
 
               {/* Fishing Heatmap */}
-              {showFishingHeatmap && data.fishing_cells.slice(0, 10000).map((cell, idx) => (
-                <CircleMarker
-                  key={`fishing-${idx}`}
-                  center={[cell.lat, cell.lon]}
-                  radius={Math.max(2, Math.min(10, cell.fishing_hours / 100))}
-                  color="orange"
-                  fillColor="orange"
-                  fillOpacity={0.6}
-                >
-                  <Popup>
-                    <div>
-                      <strong>Fishing Activity</strong><br />
-                      Hours: {cell.fishing_hours.toFixed(1)}<br />
-                      Location: {cell.lat.toFixed(3)}, {cell.lon.toFixed(3)}
-                    </div>
-                  </Popup>
-                </CircleMarker>
-              ))}
+              {showFishingHeatmap && data.fishing_cells.slice(0, 10000).map((cell, idx) => {
+                // Calculate intensity based on fishing hours (normalize to 0-1)
+                const maxHours = 1000; // Adjust based on your data range
+                const intensity = Math.min(1.0, cell.fishing_hours / maxHours);
+                const color = getHotspotColor(intensity);
+                const opacity = getHotspotOpacity(intensity);
+                const radius = Math.max(3, Math.min(12, getHotspotRadius(intensity) * 0.5));
+                
+                return (
+                  <CircleMarker
+                    key={`fishing-${idx}`}
+                    center={[cell.lat, cell.lon]}
+                    radius={radius}
+                    color={color}
+                    fillColor={color}
+                    fillOpacity={opacity}
+                    weight={1}
+                  >
+                    <Popup>
+                      <div>
+                        <strong>Fishing Activity</strong><br />
+                        Hours: {cell.fishing_hours.toFixed(1)}<br />
+                        Location: {cell.lat.toFixed(3)}, {cell.lon.toFixed(3)}<br />
+                        Intensity: {(intensity * 100).toFixed(1)}%
+                      </div>
+                    </Popup>
+                  </CircleMarker>
+                );
+              })}
 
               {/* Fishing Hotspots */}
-              {showFishingHotspots && data.fishing_hotspots.map((hotspot, idx) => (
-                <CircleMarker
-                  key={`fish-hotspot-${idx}`}
-                  center={[hotspot.lat, hotspot.lon]}
-                  radius={15}
-                  color="red"
-                  fillColor="red"
-                  fillOpacity={0.4}
-                  weight={2}
-                >
-                  <Popup>
-                    <div>
-                      <strong>Fishing Hotspot</strong><br />
-                      Cluster: {hotspot.cluster}<br />
-                      Location: {hotspot.lat.toFixed(3)}, {hotspot.lon.toFixed(3)}
-                    </div>
-                  </Popup>
-                </CircleMarker>
-              ))}
+              {showFishingHotspots && data.fishing_hotspots.map((hotspot, idx) => {
+                // High intensity for cluster centers
+                const intensity = 0.8;
+                const color = getHotspotColor(intensity);
+                const opacity = getHotspotOpacity(intensity);
+                const radius = getHotspotRadius(intensity);
+                
+                return (
+                  <CircleMarker
+                    key={`fish-hotspot-${idx}`}
+                    center={[hotspot.lat, hotspot.lon]}
+                    radius={radius}
+                    color={color}
+                    fillColor={color}
+                    fillOpacity={opacity}
+                    weight={2}
+                    opacity={Math.min(1.0, opacity + 0.2)}
+                  >
+                    <Popup>
+                      <div>
+                        <strong>Fishing Hotspot</strong><br />
+                        Cluster: {hotspot.cluster}<br />
+                        Location: {hotspot.lat.toFixed(3)}, {hotspot.lon.toFixed(3)}<br />
+                        Intensity: {(intensity * 100).toFixed(0)}%
+                      </div>
+                    </Popup>
+                  </CircleMarker>
+                );
+              })}
 
               {/* AIS Events */}
               {showAISEvents && data.ais_events.slice(0, 1000).map((event, idx) => (
@@ -353,25 +522,35 @@ const Hotspots: React.FC = () => {
               ))}
 
               {/* AIS Hotspots */}
-              {showAISHotspots && data.ais_hotspots.map((hotspot, idx) => (
-                <CircleMarker
-                  key={`ais-hotspot-${idx}`}
-                  center={[hotspot.lat, hotspot.lon]}
-                  radius={12}
-                  color="purple"
-                  fillColor="purple"
-                  fillOpacity={0.5}
-                  weight={2}
-                >
-                  <Popup>
-                    <div>
-                      <strong>AIS Hotspot</strong><br />
-                      Cluster: {hotspot.cluster}<br />
-                      Location: {hotspot.lat.toFixed(3)}, {hotspot.lon.toFixed(3)}
-                    </div>
-                  </Popup>
-                </CircleMarker>
-              ))}
+              {showAISHotspots && data.ais_hotspots.map((hotspot, idx) => {
+                // Medium-high intensity for AIS clusters
+                const intensity = 0.6;
+                const color = getHotspotColor(intensity);
+                const opacity = getHotspotOpacity(intensity);
+                const radius = getHotspotRadius(intensity);
+                
+                return (
+                  <CircleMarker
+                    key={`ais-hotspot-${idx}`}
+                    center={[hotspot.lat, hotspot.lon]}
+                    radius={radius}
+                    color={color}
+                    fillColor={color}
+                    fillOpacity={opacity}
+                    weight={2}
+                    opacity={Math.min(1.0, opacity + 0.2)}
+                  >
+                    <Popup>
+                      <div>
+                        <strong>AIS Hotspot</strong><br />
+                        Cluster: {hotspot.cluster}<br />
+                        Location: {hotspot.lat.toFixed(3)}, {hotspot.lon.toFixed(3)}<br />
+                        Intensity: {(intensity * 100).toFixed(0)}%
+                      </div>
+                    </Popup>
+                  </CircleMarker>
+                );
+              })}
             </MapWrapper>
           ) : (
             <div className="flex items-center justify-center h-full">

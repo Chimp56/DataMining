@@ -5,7 +5,9 @@ import {
   ChartBarIcon,
   ExclamationTriangleIcon,
   CheckCircleIcon,
-  ArrowPathIcon
+  ArrowPathIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon
 } from '@heroicons/react/24/outline';
 import { apiService } from '../services/api';
 
@@ -31,20 +33,32 @@ const Predictions: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [training, setTraining] = useState(false);
   const [trainingMessage, setTrainingMessage] = useState<string | null>(null);
+  
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(0);
+
+  useEffect(() => {
+    setCurrentPage(1); // Reset to first page when filters change
+    loadPredictions();
+  }, [selectedTimeframe, selectedRisk]);
 
   useEffect(() => {
     loadPredictions();
-  }, [selectedTimeframe, selectedRisk]);
+  }, [currentPage, pageSize]);
 
   const loadPredictions = async () => {
     try {
       setLoading(true);
       setError(null);
+      const offset = (currentPage - 1) * pageSize;
       const response = await apiService.getPredictions({
         timeframe: selectedTimeframe,
         riskLevel: selectedRisk === 'all' ? undefined : selectedRisk,
-        limit: 100,
-        offset: 0,
+        limit: pageSize,
+        offset: offset,
       });
       
       if (response.data && response.data.items) {
@@ -62,6 +76,8 @@ const Predictions: React.FC = () => {
           anomaly_score: item.anomaly_score,
         }));
         setPredictions(items);
+        setTotal(response.data.total || items.length);
+        setTotalPages(Math.ceil((response.data.total || items.length) / pageSize));
       }
     } catch (err: any) {
       setError(err.response?.data?.detail || err.message || 'Failed to load predictions');
@@ -131,9 +147,24 @@ const Predictions: React.FC = () => {
     }
   };
 
-  const filteredPredictions = selectedRisk === 'all' 
-    ? predictions 
-    : predictions.filter(p => p.riskLevel === selectedRisk);
+  // Calculate stats from current page predictions
+  const highRiskCount = predictions.filter(p => p.riskLevel === 'high' || p.riskLevel === 'critical').length;
+  const confirmedCount = predictions.filter(p => p.status === 'confirmed').length;
+  const avgConfidence = predictions.length > 0 
+    ? Math.round(predictions.reduce((acc, p) => acc + p.confidence, 0) / predictions.length)
+    : 0;
+
+  const handlePageChange = (newPage: number) => {
+    if (newPage >= 1 && newPage <= totalPages) {
+      setCurrentPage(newPage);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  const handlePageSizeChange = (newPageSize: number) => {
+    setPageSize(newPageSize);
+    setCurrentPage(1); // Reset to first page when page size changes
+  };
 
   return (
     <div className="space-y-6">
@@ -180,23 +211,41 @@ const Predictions: React.FC = () => {
             </select>
           </div>
 
-          <div className="flex gap-2">
-            <button 
-              onClick={loadPredictions}
-              className="btn-primary"
-              disabled={loading || training}
-            >
-              {loading ? 'Loading...' : 'Refresh'}
-            </button>
-            <button 
-              onClick={handleTrainModel}
-              className="btn-primary flex items-center gap-2"
-              disabled={training || loading}
-            >
-              <ArrowPathIcon className={`h-4 w-4 ${training ? 'animate-spin' : ''}`} />
-              {training ? 'Training...' : 'Train Model'}
-            </button>
-            <button className="btn-secondary">Export Predictions</button>
+          <div className="flex gap-2 items-end">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Items per Page
+              </label>
+              <select
+                value={pageSize}
+                onChange={(e) => handlePageSizeChange(Number(e.target.value))}
+                className="input-field w-auto"
+                disabled={loading}
+              >
+                <option value={25}>25</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={200}>200</option>
+              </select>
+            </div>
+            <div className="flex gap-2">
+              <button 
+                onClick={loadPredictions}
+                className="btn-primary"
+                disabled={loading || training}
+              >
+                {loading ? 'Loading...' : 'Refresh'}
+              </button>
+              <button 
+                onClick={handleTrainModel}
+                className="btn-primary flex items-center gap-2"
+                disabled={training || loading}
+              >
+                <ArrowPathIcon className={`h-4 w-4 ${training ? 'animate-spin' : ''}`} />
+                {training ? 'Training...' : 'Train Model'}
+              </button>
+              <button className="btn-secondary">Export Predictions</button>
+            </div>
           </div>
         </div>
       </div>
@@ -214,7 +263,7 @@ const Predictions: React.FC = () => {
                   Total Predictions
                 </dt>
                 <dd className="text-2xl font-semibold text-gray-900">
-                  {filteredPredictions.length}
+                  {total.toLocaleString()}
                 </dd>
               </dl>
             </div>
@@ -232,7 +281,7 @@ const Predictions: React.FC = () => {
                   High Risk Predictions
                 </dt>
                 <dd className="text-2xl font-semibold text-gray-900">
-                  {filteredPredictions.filter(p => p.riskLevel === 'high' || p.riskLevel === 'critical').length}
+                  {highRiskCount}
                 </dd>
               </dl>
             </div>
@@ -250,7 +299,7 @@ const Predictions: React.FC = () => {
                   Confirmed Predictions
                 </dt>
                 <dd className="text-2xl font-semibold text-gray-900">
-                  {filteredPredictions.filter(p => p.status === 'confirmed').length}
+                  {confirmedCount}
                 </dd>
               </dl>
             </div>
@@ -268,9 +317,7 @@ const Predictions: React.FC = () => {
                   Average Confidence
                 </dt>
                 <dd className="text-2xl font-semibold text-gray-900">
-                  {filteredPredictions.length > 0 
-                    ? Math.round(filteredPredictions.reduce((acc, p) => acc + p.confidence, 0) / filteredPredictions.length)
-                    : 0}%
+                  {avgConfidence}%
                 </dd>
               </dl>
             </div>
@@ -302,14 +349,17 @@ const Predictions: React.FC = () => {
       {/* Predictions List */}
       {!loading && !error && (
         <div className="card">
-          <h3 className="text-lg font-medium text-gray-900 mb-4">
-            Prediction Results ({filteredPredictions.length} predictions)
-          </h3>
-          {filteredPredictions.length === 0 ? (
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-medium text-gray-900">
+              Prediction Results ({total.toLocaleString()} total, showing {predictions.length} on this page)
+            </h3>
+          </div>
+          {predictions.length === 0 ? (
             <p className="text-gray-500">No predictions found for the selected filters.</p>
           ) : (
-            <div className="space-y-4">
-              {filteredPredictions.map((prediction) => (
+            <>
+              <div className="space-y-4 mb-6">
+                {predictions.map((prediction) => (
             <div
               key={prediction.id}
               className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50"
@@ -369,8 +419,72 @@ const Predictions: React.FC = () => {
                 </div>
               </div>
             </div>
-              ))}
-            </div>
+                ))}
+              </div>
+              
+              {/* Pagination Controls */}
+              {totalPages > 1 && (
+                <div className="flex items-center justify-between border-t border-gray-200 pt-4 mt-6">
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm text-gray-700">
+                      Showing <span className="font-medium">{(currentPage - 1) * pageSize + 1}</span> to{' '}
+                      <span className="font-medium">{Math.min(currentPage * pageSize, total)}</span> of{' '}
+                      <span className="font-medium">{total.toLocaleString()}</span> results
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handlePageChange(currentPage - 1)}
+                      disabled={currentPage === 1 || loading}
+                      className="px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                    >
+                      <ChevronLeftIcon className="h-4 w-4" />
+                      Previous
+                    </button>
+                    
+                    {/* Page Numbers */}
+                    <div className="flex items-center gap-1">
+                      {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                        let pageNum;
+                        if (totalPages <= 5) {
+                          pageNum = i + 1;
+                        } else if (currentPage <= 3) {
+                          pageNum = i + 1;
+                        } else if (currentPage >= totalPages - 2) {
+                          pageNum = totalPages - 4 + i;
+                        } else {
+                          pageNum = currentPage - 2 + i;
+                        }
+                        
+                        return (
+                          <button
+                            key={pageNum}
+                            onClick={() => handlePageChange(pageNum)}
+                            disabled={loading}
+                            className={`px-3 py-2 text-sm font-medium rounded-md ${
+                              currentPage === pageNum
+                                ? 'bg-blue-600 text-white'
+                                : 'text-gray-700 bg-white border border-gray-300 hover:bg-gray-50'
+                            } disabled:opacity-50 disabled:cursor-not-allowed`}
+                          >
+                            {pageNum}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    
+                    <button
+                      onClick={() => handlePageChange(currentPage + 1)}
+                      disabled={currentPage === totalPages || loading}
+                      className="px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                    >
+                      Next
+                      <ChevronRightIcon className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
